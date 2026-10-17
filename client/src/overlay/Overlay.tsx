@@ -1,101 +1,262 @@
-import { useEffect, useRef, type PointerEvent } from "react";
-import type { Annotation, PointerState } from "../../../shared/src/types";
-import { computeVideoBox, videoToCanvasPoint } from "../tracking/coords";
-import { projectPoint, type Homography } from "../tracking/homography";
+import { useEffect, useRef, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
+import { BOARD, TEST_DOT, VERIFY_ZONE } from "../../../shared/src/target-layout";
+import type { Annotation, PointerState, Vec2, VerifyStatus } from "../../../shared/src/types";
+import { useRoomStore } from "../state/room";
+import { computeVideoBox, videoToCanvasPoint, type VideoBox } from "../tracking/coords";
+import type { Homography } from "../tracking/homography";
+import type { TrackingStatus } from "../tracking/tracker";
 
-type OverlayProps = {
-  width: number;
-  height: number;
-  videoWidth: number;
-  videoHeight: number;
-  mirrored: boolean;
+export type OverlayView = {
   homography: Homography | null;
-  annotations: Annotation[];
-  pointer: PointerState;
-  trackingLost: boolean;
-  onTap?: (point: { x: number; y: number }) => void;
-  onHoldPointer?: (point: { x: number; y: number } | null) => void;
+  status: TrackingStatus;
+  usingFallback: boolean;
+  markers: Array<{ id: number; corners: Vec2[] }>;
 };
 
-export function Overlay({
-  width,
-  height,
-  videoWidth,
-  videoHeight,
-  mirrored,
-  homography,
-  annotations,
-  pointer,
-  trackingLost,
-  onTap,
-  onHoldPointer,
-}: OverlayProps) {
+type OverlayProps = {
+  videoRef: RefObject<HTMLVideoElement | null>;
+  viewRef: RefObject<OverlayView>;
+  annotationsRef: RefObject<Annotation[]>;
+  localPointerRef: RefObject<PointerState | null>;
+  pendingArrowRef: RefObject<Vec2 | null>;
+  verifyStatusRef: RefObject<VerifyStatus | null>;
+  mirrored: boolean;
+  debug: boolean;
+  showGuidance: boolean;
+  showVerifyZone: boolean;
+  onPointerDown?: (point: Vec2) => void;
+  onPointerMove?: (point: Vec2) => void;
+  onPointerUp?: (point: Vec2) => void;
+};
+
+const POINTER_FADE_MS = 1000;
+const ACCENT = "#22d3ee";
+const VERIFY_COLORS: Record<VerifyStatus, string> = {
+  aligned: "#22c55e",
+  not_yet: "#f59e0b",
+  tracking_lost: "#94a3b8",
+};
+
+function project(h: Homography, p: Vec2): Vec2 | null {
+  const w = h[6] * p.x + h[7] * p.y + h[8];
+  if (w <= 1e-6) return null;
+  return { x: (h[0] * p.x + h[1] * p.y + h[2]) / w, y: (h[3] * p.x + h[4] * p.y + h[5]) / w };
+}
+
+function drawLabel(ctx: CanvasRenderingContext2D, text: string, at: Vec2) {
+  ctx.font = "600 15px system-ui, sans-serif";
+  const width = ctx.measureText(text).width + 16;
+  const x = at.x + 14;
+  const y = at.y - 32;
+  ctx.fillStyle = "rgba(2, 6, 23, 0.85)";
+  ctx.beginPath();
+  ctx.roundRect(x, y, width, 26, 6);
+  ctx.fill();
+  ctx.fillStyle = "#f8fafc";
+  ctx.fillText(text, x + 8, y + 18);
+}
+
+function drawPin(ctx: CanvasRenderingContext2D, at: Vec2, color = ACCENT) {
+  ctx.fillStyle = color;
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.arc(at.x, at.y, 10, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+}
+
+function drawArrow(ctx: CanvasRenderingContext2D, from: Vec2, to: Vec2) {
+  const angle = Math.atan2(to.y - from.y, to.x - from.x);
+  const head = 18;
+  ctx.strokeStyle = ACCENT;
+  ctx.fillStyle = ACCENT;
+  ctx.lineWidth = 5;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(from.x, from.y);
+  ctx.lineTo(to.x - Math.cos(angle) * head * 0.6, to.y - Math.sin(angle) * head * 0.6);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(to.x, to.y);
+  ctx.lineTo(to.x - head * Math.cos(angle - 0.45), to.y - head * Math.sin(angle - 0.45));
+  ctx.lineTo(to.x - head * Math.cos(angle + 0.45), to.y - head * Math.sin(angle + 0.45));
+  ctx.closePath();
+  ctx.fill();
+}
+
+function drawBanner(ctx: CanvasRenderingContext2D, width: number, text: string, color: string) {
+  ctx.font = "600 15px system-ui, sans-serif";
+  const textWidth = ctx.measureText(text).width;
+  const boxWidth = Math.min(width - 24, textWidth + 28);
+  const x = (width - boxWidth) / 2;
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.roundRect(x, 12, boxWidth, 34, 17);
+  ctx.fill();
+  ctx.fillStyle = "#ffffff";
+  ctx.fillText(text, x + 14, 34, boxWidth - 28);
+}
+
+export function Overlay(props: OverlayProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const propsRef = useRef(props);
+  propsRef.current = props;
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const dpr = window.devicePixelRatio || 1;
-    canvas.width = Math.floor(width * dpr);
-    canvas.height = Math.floor(height * dpr);
-    canvas.style.width = `${width}px`;
-    canvas.style.height = `${height}px`;
-
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    ctx.scale(dpr, dpr);
-    ctx.clearRect(0, 0, width, height);
+    let raf = 0;
 
-    const box = computeVideoBox(width, height, Math.max(videoWidth, 1), Math.max(videoHeight, 1));
-
-    if (trackingLost) {
-      ctx.fillStyle = "rgba(180, 0, 0, 0.75)";
-      ctx.fillRect(12, 12, 144, 34);
-      ctx.fillStyle = "#fff";
-      ctx.font = "600 14px sans-serif";
-      ctx.fillText("Target lost", 24, 34);
-    }
-
-    for (const annotation of annotations) {
-      if (!homography) continue;
-      const startVideo = projectPoint(homography, annotation.start);
-      const start = videoToCanvasPoint(startVideo, box, mirrored, videoWidth);
-      const end = annotation.end
-        ? videoToCanvasPoint(projectPoint(homography, annotation.end), box, mirrored, videoWidth)
-        : null;
-
-      ctx.strokeStyle = "#2dd4bf";
-      ctx.fillStyle = "#2dd4bf";
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      ctx.arc(start.x, start.y, 8, 0, Math.PI * 2);
-      ctx.fill();
-      if (annotation.type === "arrow" && end) {
-        ctx.beginPath();
-        ctx.moveTo(start.x, start.y);
-        ctx.lineTo(end.x, end.y);
-        ctx.stroke();
+    const render = () => {
+      raf = requestAnimationFrame(render);
+      const p = propsRef.current;
+      const dpr = window.devicePixelRatio || 1;
+      const cssWidth = canvas.clientWidth;
+      const cssHeight = canvas.clientHeight;
+      if (canvas.width !== Math.round(cssWidth * dpr) || canvas.height !== Math.round(cssHeight * dpr)) {
+        canvas.width = Math.round(cssWidth * dpr);
+        canvas.height = Math.round(cssHeight * dpr);
       }
-      if (annotation.text) {
-        ctx.fillStyle = "rgba(15, 23, 42, 0.82)";
-        ctx.fillRect(start.x + 10, start.y - 24, Math.max(100, annotation.text.length * 8), 24);
-        ctx.fillStyle = "#f8fafc";
-        ctx.font = "13px sans-serif";
-        ctx.fillText(annotation.text, start.x + 14, start.y - 8);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, cssWidth, cssHeight);
+
+      const video = p.videoRef.current;
+      if (!video?.videoWidth) return;
+      const videoWidth = video.videoWidth;
+      const box: VideoBox = computeVideoBox(cssWidth, cssHeight, videoWidth, video.videoHeight);
+      const toCanvas = (videoPoint: Vec2) => videoToCanvasPoint(videoPoint, box, p.mirrored, videoWidth);
+      const view = p.viewRef.current;
+      const h = view.homography;
+      const mmToCanvas = (mm: Vec2) => {
+        if (!h) return null;
+        const videoPoint = project(h, mm);
+        return videoPoint ? toCanvas(videoPoint) : null;
+      };
+      const normToCanvas = (n: Vec2) => toCanvas({ x: n.x * videoWidth, y: n.y * video.videoHeight });
+
+      if (p.debug) {
+        ctx.strokeStyle = "#facc15";
+        ctx.lineWidth = 2;
+        for (const marker of view.markers) {
+          const pts = marker.corners.map(toCanvas);
+          ctx.beginPath();
+          pts.forEach((pt, i) => (i === 0 ? ctx.moveTo(pt.x, pt.y) : ctx.lineTo(pt.x, pt.y)));
+          ctx.closePath();
+          ctx.stroke();
+          ctx.fillStyle = "#facc15";
+          ctx.font = "600 12px system-ui, sans-serif";
+          ctx.fillText(String(marker.id), pts[0].x + 4, pts[0].y - 4);
+        }
+        const outline = [
+          { x: 0, y: 0 },
+          { x: BOARD.width, y: 0 },
+          { x: BOARD.width, y: BOARD.height },
+          { x: 0, y: BOARD.height },
+        ].map(mmToCanvas);
+        if (outline.every(Boolean)) {
+          ctx.strokeStyle = "rgba(250, 204, 21, 0.6)";
+          ctx.beginPath();
+          outline.forEach((pt, i) => (i === 0 ? ctx.moveTo(pt!.x, pt!.y) : ctx.lineTo(pt!.x, pt!.y)));
+          ctx.closePath();
+          ctx.stroke();
+        }
+        const dot = mmToCanvas(TEST_DOT);
+        if (dot) {
+          ctx.strokeStyle = "#e11d48";
+          ctx.lineWidth = 3;
+          ctx.beginPath();
+          ctx.arc(dot.x, dot.y, 12, 0, Math.PI * 2);
+          ctx.stroke();
+        }
       }
-    }
 
-    if (pointer.position && homography && Date.now() - pointer.ts < 1000) {
-      const pointerVideo = projectPoint(homography, pointer.position);
-      const p = videoToCanvasPoint(pointerVideo, box, mirrored, videoWidth);
-      ctx.fillStyle = "rgba(248,113,113,0.9)";
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
-      ctx.fill();
-    }
-  }, [annotations, height, homography, mirrored, pointer, trackingLost, videoHeight, videoWidth, width]);
+      if (p.showVerifyZone && h) {
+        const zone = [
+          { x: VERIFY_ZONE.x, y: VERIFY_ZONE.y },
+          { x: VERIFY_ZONE.x + VERIFY_ZONE.width, y: VERIFY_ZONE.y },
+          { x: VERIFY_ZONE.x + VERIFY_ZONE.width, y: VERIFY_ZONE.y + VERIFY_ZONE.height },
+          { x: VERIFY_ZONE.x, y: VERIFY_ZONE.y + VERIFY_ZONE.height },
+        ].map(mmToCanvas);
+        if (zone.every(Boolean)) {
+          ctx.strokeStyle = VERIFY_COLORS[p.verifyStatusRef.current ?? "tracking_lost"];
+          ctx.lineWidth = 3;
+          ctx.setLineDash([10, 6]);
+          ctx.beginPath();
+          zone.forEach((pt, i) => (i === 0 ? ctx.moveTo(pt!.x, pt!.y) : ctx.lineTo(pt!.x, pt!.y)));
+          ctx.closePath();
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+      }
 
-  const toCanvasPoint = (event: PointerEvent<HTMLCanvasElement>) => {
+      if (p.showGuidance && h) {
+        for (const annotation of p.annotationsRef.current) {
+          const start = mmToCanvas(annotation.start);
+          if (!start) continue;
+          if (annotation.type === "arrow" && annotation.end) {
+            const end = mmToCanvas(annotation.end);
+            if (end) drawArrow(ctx, start, end);
+            if (end && annotation.text) drawLabel(ctx, annotation.text, start);
+            continue;
+          }
+          if (annotation.type === "pin") drawPin(ctx, start);
+          if (annotation.type === "text") {
+            ctx.fillStyle = ACCENT;
+            ctx.beginPath();
+            ctx.arc(start.x, start.y, 5, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          if (annotation.text) drawLabel(ctx, annotation.text, start);
+        }
+        const pending = p.pendingArrowRef.current;
+        const pendingAt = pending ? mmToCanvas(pending) : null;
+        if (pendingAt) {
+          ctx.strokeStyle = ACCENT;
+          ctx.lineWidth = 3;
+          ctx.setLineDash([4, 4]);
+          ctx.beginPath();
+          ctx.arc(pendingAt.x, pendingAt.y, 12, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+      }
+
+      if (p.showGuidance) {
+        const now = Date.now();
+        const pointers = [p.localPointerRef.current, useRoomStore.getState().pointer];
+        for (const pointer of pointers) {
+          if (!pointer?.position) continue;
+          const age = now - pointer.ts;
+          if (age > POINTER_FADE_MS) continue;
+          const at = pointer.space === "target" ? mmToCanvas(pointer.position) : normToCanvas(pointer.position);
+          if (!at) continue;
+          const alpha = 1 - age / POINTER_FADE_MS;
+          ctx.fillStyle = `rgba(239, 68, 68, ${0.35 * alpha})`;
+          ctx.beginPath();
+          ctx.arc(at.x, at.y, 22, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = `rgba(239, 68, 68, ${alpha})`;
+          ctx.beginPath();
+          ctx.arc(at.x, at.y, 8, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      if (view.status === "lost") {
+        drawBanner(ctx, cssWidth, "Target lost - point the camera at the printed target", "rgba(185, 28, 28, 0.9)");
+      } else if (view.usingFallback) {
+        drawBanner(ctx, cssWidth, "Using presenter's tracking", "rgba(30, 64, 175, 0.85)");
+      }
+    };
+
+    render();
+    return () => cancelAnimationFrame(raf);
+  }, []);
+
+  const toPoint = (event: ReactPointerEvent<HTMLCanvasElement>): Vec2 => {
     const rect = event.currentTarget.getBoundingClientRect();
     return { x: event.clientX - rect.left, y: event.clientY - rect.top };
   };
@@ -104,20 +265,15 @@ export function Overlay({
     <canvas
       ref={canvasRef}
       className="overlay"
-      onPointerUp={(event) => {
-        onTap?.(toCanvasPoint(event));
-        onHoldPointer?.(null);
-      }}
       onPointerDown={(event) => {
         event.currentTarget.setPointerCapture(event.pointerId);
-        onHoldPointer?.(toCanvasPoint(event));
+        props.onPointerDown?.(toPoint(event));
       }}
       onPointerMove={(event) => {
-        if (event.buttons) {
-          onHoldPointer?.(toCanvasPoint(event));
-        }
+        if (event.buttons) props.onPointerMove?.(toPoint(event));
       }}
-      onPointerCancel={() => onHoldPointer?.(null)}
+      onPointerUp={(event) => props.onPointerUp?.(toPoint(event))}
+      onPointerCancel={(event) => props.onPointerUp?.(toPoint(event))}
     />
   );
 }

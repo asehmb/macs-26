@@ -1,116 +1,265 @@
-import type { Socket } from "socket.io-client";
+import type { SignalMessage } from "../../../shared/src/types";
 
-export type PeerCallbacks = {
-  onRemoteStream: (stream: MediaStream) => void;
-  onConnectionState: (state: RTCPeerConnectionState) => void;
-};
+type Send = (to: string, data: SignalMessage) => void;
 
-const ICE_SERVERS: RTCIceServer[] = [
-  { urls: "stun:stun.l.google.com:19302" },
-];
+const ICE_SERVERS: RTCIceServer[] = [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }];
 
 if (import.meta.env.VITE_TURN_URL) {
   ICE_SERVERS.push({
-    urls: import.meta.env.VITE_TURN_URL,
+    urls: String(import.meta.env.VITE_TURN_URL).split(","),
     username: import.meta.env.VITE_TURN_USER,
     credential: import.meta.env.VITE_TURN_PASS,
   });
 }
 
-export class RoomPeer {
-  private pc: RTCPeerConnection;
+/** Markers need sharp edges on the helper side, so favour resolution and a generous bitrate. */
+const VIDEO_MAX_BITRATE = 2_500_000;
 
-  private makingOffer = false;
+function newSessionId() {
+  return Math.random().toString(36).slice(2, 10);
+}
 
-  private ignoreOffer = false;
-
-  private polite: boolean;
+abstract class Link {
+  protected pc: RTCPeerConnection | null = null;
+  protected sid: string | null = null;
+  protected remoteId: string | null = null;
+  private pendingCandidates: RTCIceCandidateInit[] = [];
+  /** Candidates can fire before setLocalDescription resolves; hold them until the SDP is sent. */
+  private outgoingCandidates: RTCIceCandidateInit[] = [];
+  private descriptionSent = false;
 
   constructor(
-    private socket: Socket,
-    private roomCode: string,
-    private callbacks: PeerCallbacks,
-    private localStream: MediaStream | null,
-    polite: boolean,
-  ) {
-    this.polite = polite;
-    this.pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-    this.bind();
+    protected send: Send,
+    protected onState: (state: RTCPeerConnectionState | "idle") => void,
+  ) {}
+
+  get peerId() {
+    return this.remoteId;
   }
 
-  private bind() {
-    if (this.localStream) {
-      this.localStream.getTracks().forEach((track) => {
-        this.pc.addTrack(track, this.localStream as MediaStream);
-      });
-    } else {
-      this.pc.addTransceiver("video", { direction: "recvonly" });
-      this.pc.addTransceiver("audio", { direction: "recvonly" });
+  protected createPeer(remoteId: string, sid: string) {
+    this.close();
+    this.remoteId = remoteId;
+    this.sid = sid;
+    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    this.descriptionSent = false;
+    this.outgoingCandidates = [];
+    pc.onicecandidate = ({ candidate }) => {
+      if (!candidate || this.pc !== pc) return;
+      if (this.descriptionSent) this.send(remoteId, { kind: "candidate", sid, candidate: candidate.toJSON() });
+      else this.outgoingCandidates.push(candidate.toJSON());
+    };
+    pc.onconnectionstatechange = () => {
+      if (this.pc === pc) this.onState(pc.connectionState);
+    };
+    this.pc = pc;
+    this.onState(pc.connectionState);
+    if (import.meta.env.DEV) (globalThis as { __rcPeer?: RTCPeerConnection }).__rcPeer = pc;
+    return pc;
+  }
+
+  protected sendDescription(message: Extract<SignalMessage, { kind: "offer" | "answer" }>) {
+    const remoteId = this.remoteId;
+    if (!remoteId) return;
+    this.send(remoteId, message);
+    this.descriptionSent = true;
+    for (const candidate of this.outgoingCandidates) {
+      this.send(remoteId, { kind: "candidate", sid: message.sid, candidate });
     }
-
-    this.pc.ontrack = (event) => {
-      this.callbacks.onRemoteStream(event.streams[0]);
-    };
-
-    this.pc.onconnectionstatechange = () => {
-      this.callbacks.onConnectionState(this.pc.connectionState);
-    };
-
-    this.pc.onicecandidate = ({ candidate }) => {
-      this.socket.emit("signal", {
-        to: this.roomCode,
-        data: { candidate },
-      });
-    };
-
-    this.pc.onnegotiationneeded = async () => {
-      try {
-        this.makingOffer = true;
-        await this.pc.setLocalDescription();
-        this.socket.emit("signal", {
-          to: this.roomCode,
-          data: { description: this.pc.localDescription },
-        });
-      } finally {
-        this.makingOffer = false;
-      }
-    };
+    this.outgoingCandidates = [];
   }
 
-  async handleSignal(data: { description?: RTCSessionDescriptionInit; candidate?: RTCIceCandidateInit }) {
-    if (data.description) {
-      const readyForOffer =
-        !this.makingOffer &&
-        (this.pc.signalingState === "stable" || this.pc.signalingState === "have-local-offer");
-      const collision = data.description.type === "offer" && !readyForOffer;
-
-      this.ignoreOffer = !this.polite && collision;
-      if (this.ignoreOffer) {
-        return;
-      }
-      await this.pc.setRemoteDescription(data.description);
-      if (data.description.type === "offer") {
-        await this.pc.setLocalDescription();
-        this.socket.emit("signal", {
-          to: this.roomCode,
-          data: { description: this.pc.localDescription },
-        });
-      }
-    } else if (data.candidate && !this.ignoreOffer) {
-      await this.pc.addIceCandidate(data.candidate);
+  protected async addCandidate(sid: string, candidate: RTCIceCandidateInit) {
+    if (!this.pc || sid !== this.sid) return;
+    if (!this.pc.remoteDescription) {
+      this.pendingCandidates.push(candidate);
+      return;
     }
+    await this.pc.addIceCandidate(candidate).catch(() => undefined);
   }
 
-  replaceVideoTrack(track: MediaStreamTrack) {
-    const sender = this.pc.getSenders().find((item) => item.track?.kind === "video");
-    sender?.replaceTrack(track);
-  }
-
-  async reconnect() {
-    this.pc.restartIce();
+  protected async flushCandidates() {
+    const queued = this.pendingCandidates;
+    this.pendingCandidates = [];
+    for (const candidate of queued) {
+      await this.pc?.addIceCandidate(candidate).catch(() => undefined);
+    }
   }
 
   close() {
-    this.pc.close();
+    this.pendingCandidates = [];
+    this.outgoingCandidates = [];
+    this.descriptionSent = false;
+    if (this.pc) {
+      this.pc.onicecandidate = null;
+      this.pc.onconnectionstatechange = null;
+      this.pc.ontrack = null;
+      this.pc.close();
+    }
+    this.pc = null;
+    this.sid = null;
+    this.remoteId = null;
+    this.onState("idle");
+  }
+}
+
+export class PresenterLink extends Link {
+  private stream: MediaStream | null = null;
+  private videoSender: RTCRtpSender | null = null;
+  private audioSender: RTCRtpSender | null = null;
+  private retryTimer: number | null = null;
+
+  constructor(
+    send: Send,
+    onState: (state: RTCPeerConnectionState | "idle") => void,
+    private onRemoteAudio: (stream: MediaStream | null) => void,
+  ) {
+    super(send, onState);
+  }
+
+  setStream(stream: MediaStream | null) {
+    this.stream = stream;
+    const video = stream?.getVideoTracks()[0] ?? null;
+    const audio = stream?.getAudioTracks()[0] ?? null;
+    if (video) video.contentHint = "detail";
+    this.videoSender?.replaceTrack(video).catch(() => undefined);
+    this.audioSender?.replaceTrack(audio).catch(() => undefined);
+  }
+
+  async connectTo(helperId: string) {
+    if (this.retryTimer !== null) {
+      window.clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+    }
+    const sid = newSessionId();
+    const pc = this.createPeer(helperId, sid);
+    const streams = this.stream ? [this.stream] : [];
+    const video = this.stream?.getVideoTracks()[0];
+    const audio = this.stream?.getAudioTracks()[0];
+    if (video) video.contentHint = "detail";
+
+    const videoTransceiver = pc.addTransceiver(video ?? "video", {
+      direction: "sendonly",
+      streams,
+      sendEncodings: [{ maxBitrate: VIDEO_MAX_BITRATE }],
+    });
+    const audioTransceiver = pc.addTransceiver(audio ?? "audio", { direction: "sendrecv", streams });
+    this.videoSender = videoTransceiver.sender;
+    this.audioSender = audioTransceiver.sender;
+
+    pc.ontrack = (event) => {
+      if (event.track.kind === "audio") this.onRemoteAudio(new MediaStream([event.track]));
+    };
+    pc.addEventListener("connectionstatechange", () => {
+      if (this.pc !== pc) return;
+      if (pc.connectionState === "connected") this.tuneSender();
+      if (pc.connectionState === "failed") this.scheduleRetry(helperId);
+    });
+
+    const offer = await pc.createOffer();
+    if (this.pc !== pc) return;
+    await pc.setLocalDescription(offer);
+    this.sendDescription({ kind: "offer", sid, sdp: pc.localDescription!.toJSON() });
+  }
+
+  private scheduleRetry(helperId: string) {
+    if (this.retryTimer !== null) return;
+    this.retryTimer = window.setTimeout(() => {
+      this.retryTimer = null;
+      if (this.remoteId === helperId) this.connectTo(helperId).catch(() => undefined);
+    }, 1500);
+  }
+
+  private tuneSender() {
+    const sender = this.videoSender;
+    if (!sender) return;
+    const params = sender.getParameters();
+    if (!params.encodings?.length) params.encodings = [{}];
+    params.encodings[0].maxBitrate = VIDEO_MAX_BITRATE;
+    (params as RTCRtpSendParameters & { degradationPreference?: string }).degradationPreference =
+      "maintain-resolution";
+    sender.setParameters(params).catch(() => undefined);
+  }
+
+  async handleSignal(from: string, data: SignalMessage) {
+    if (data.kind === "request-offer") {
+      await this.connectTo(from);
+      return;
+    }
+    if (from !== this.remoteId || !this.pc) return;
+    if (data.kind === "answer" && data.sid === this.sid && this.pc.signalingState === "have-local-offer") {
+      await this.pc.setRemoteDescription(data.sdp);
+      await this.flushCandidates();
+    } else if (data.kind === "candidate") {
+      await this.addCandidate(data.sid, data.candidate);
+    }
+  }
+
+  close() {
+    if (this.retryTimer !== null) {
+      window.clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+    }
+    this.videoSender = null;
+    this.audioSender = null;
+    super.close();
+    this.onRemoteAudio?.(null);
+  }
+}
+
+export class HelperLink extends Link {
+  private micTrack: MediaStreamTrack | null = null;
+  private audioSender: RTCRtpSender | null = null;
+
+  constructor(
+    send: Send,
+    onState: (state: RTCPeerConnectionState | "idle") => void,
+    private onRemoteStream: (stream: MediaStream | null) => void,
+  ) {
+    super(send, onState);
+  }
+
+  setMicTrack(track: MediaStreamTrack | null) {
+    this.micTrack = track;
+    this.audioSender?.replaceTrack(track).catch(() => undefined);
+  }
+
+  requestOffer(presenterId: string) {
+    this.send(presenterId, { kind: "request-offer" });
+  }
+
+  async handleSignal(from: string, data: SignalMessage) {
+    if (data.kind === "offer") {
+      const pc = this.createPeer(from, data.sid);
+      const remote = new MediaStream();
+      pc.ontrack = (event) => {
+        if (!remote.getTracks().includes(event.track)) remote.addTrack(event.track);
+        this.onRemoteStream(event.streams[0] ?? remote);
+      };
+      await pc.setRemoteDescription(data.sdp);
+      for (const transceiver of pc.getTransceivers()) {
+        const kind = transceiver.receiver.track.kind;
+        if (kind === "audio") {
+          transceiver.direction = "sendrecv";
+          this.audioSender = transceiver.sender;
+          await transceiver.sender.replaceTrack(this.micTrack).catch(() => undefined);
+        } else {
+          transceiver.direction = "recvonly";
+        }
+      }
+      const answer = await pc.createAnswer();
+      if (this.pc !== pc) return;
+      await pc.setLocalDescription(answer);
+      this.sendDescription({ kind: "answer", sid: data.sid, sdp: pc.localDescription!.toJSON() });
+      await this.flushCandidates();
+    } else if (data.kind === "candidate" && from === this.remoteId) {
+      await this.addCandidate(data.sid, data.candidate);
+    }
+  }
+
+  close() {
+    this.audioSender = null;
+    super.close();
+    this.onRemoteStream?.(null);
   }
 }

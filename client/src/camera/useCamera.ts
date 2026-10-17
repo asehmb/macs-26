@@ -1,61 +1,103 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { openSyntheticCamera } from "./syntheticCamera";
 
-export type CameraState = {
-  stream: MediaStream | null;
-  error: string | null;
-  facingMode: "environment" | "user";
-  requesting: boolean;
-};
+export type FacingMode = "environment" | "user";
 
-export function useCamera() {
-  const [stream, setStream] = useState<MediaStream | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [facingMode, setFacingMode] = useState<"environment" | "user">("environment");
-  const [requesting, setRequesting] = useState(false);
+export type CameraStatus = "idle" | "starting" | "ready" | "error";
 
-  const stop = useCallback(() => {
-    setStream((prev) => {
-      prev?.getTracks().forEach((track) => track.stop());
-      return null;
+function describeError(error: unknown): string {
+  if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+    return "Camera needs HTTPS. Open the https:// link (for example the ngrok URL), not an http:// address.";
+  }
+  const name = error instanceof DOMException ? error.name : "";
+  switch (name) {
+    case "NotAllowedError":
+    case "SecurityError":
+      return "Camera permission was denied. Allow camera access for this site in your browser settings, then tap Start camera.";
+    case "NotFoundError":
+    case "OverconstrainedError":
+      return "No matching camera was found on this device.";
+    case "NotReadableError":
+    case "AbortError":
+      return "The camera is busy. Close other apps or tabs using it, then tap Start camera.";
+    default:
+      return error instanceof Error ? error.message : "Could not start the camera.";
+  }
+}
+
+async function openCamera(facingMode: FacingMode): Promise<MediaStream> {
+  const video: MediaTrackConstraints = {
+    facingMode: { ideal: facingMode },
+    width: { ideal: 1280 },
+    height: { ideal: 720 },
+  };
+  try {
+    return await navigator.mediaDevices.getUserMedia({
+      video,
+      audio: { echoCancellation: true, noiseSuppression: true },
     });
-  }, []);
+  } catch (error) {
+    // A denied or missing microphone should not block the camera.
+    if (error instanceof DOMException && error.name === "NotReadableError") throw error;
+    return navigator.mediaDevices.getUserMedia({ video, audio: false });
+  }
+}
 
-  const start = useCallback(async (nextFacingMode = facingMode) => {
-    setRequesting(true);
+export function useCamera({ synthetic = false }: { synthetic?: boolean } = {}) {
+  const [stream, setStream] = useState<MediaStream | null>(null);
+  const [status, setStatus] = useState<CameraStatus>("idle");
+  const [error, setError] = useState<string | null>(null);
+  const [facingMode, setFacingMode] = useState<FacingMode>("environment");
+  const streamRef = useRef<MediaStream | null>(null);
+  const facingRef = useRef<FacingMode>("environment");
+  const requestRef = useRef(0);
+
+  const stopTracks = () => {
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+  };
+
+  const start = useCallback(async (nextFacing: FacingMode = facingRef.current) => {
+    const request = ++requestRef.current;
+    setStatus("starting");
     setError(null);
+    stopTracks();
+    setStream(null);
     try {
-      const next = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: nextFacingMode } },
-        audio: true,
+      const next = synthetic ? await openSyntheticCamera() : await openCamera(nextFacing);
+      if (request !== requestRef.current) {
+        next.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      next.getVideoTracks()[0]?.addEventListener("ended", () => {
+        if (streamRef.current !== next) return;
+        setStatus("error");
+        setError("The camera stopped (another app may have taken it). Tap Start camera.");
       });
-      stop();
+      streamRef.current = next;
+      facingRef.current = nextFacing;
+      setFacingMode(nextFacing);
       setStream(next);
-      setFacingMode(nextFacingMode);
+      setStatus("ready");
     } catch (cameraError) {
-      setError(
-        cameraError instanceof Error
-          ? cameraError.message
-          : "Unable to access camera. Check permissions and HTTPS.",
-      );
-    } finally {
-      setRequesting(false);
+      if (request !== requestRef.current) return;
+      setStatus("error");
+      setError(describeError(cameraError));
     }
-  }, [facingMode, stop]);
+  }, [synthetic]);
 
-  const switchCamera = useCallback(async () => {
-    const next = facingMode === "environment" ? "user" : "environment";
-    await start(next);
-  }, [facingMode, start]);
-
-  useEffect(() => stop, [stop]);
-
-  return useMemo(
-    () => ({
-      state: { stream, error, facingMode, requesting } satisfies CameraState,
-      start,
-      stop,
-      switchCamera,
-    }),
-    [error, facingMode, requesting, start, stop, stream, switchCamera],
+  const switchCamera = useCallback(
+    () => start(facingRef.current === "environment" ? "user" : "environment"),
+    [start],
   );
+
+  useEffect(
+    () => () => {
+      requestRef.current += 1;
+      stopTracks();
+    },
+    [],
+  );
+
+  return { stream, status, error, facingMode, start, switchCamera };
 }

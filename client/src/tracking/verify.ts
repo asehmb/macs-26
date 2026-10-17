@@ -1,60 +1,72 @@
+import type { ColorPreset, VerifyStatus } from "../../../shared/src/types";
+import { VERIFY_ZONE } from "../../../shared/src/target-layout";
+import type { DetectionResult } from "./detector";
 import { projectPoint, type Homography } from "./homography";
 
-function rgbToHsv(r: number, g: number, b: number) {
-  const rr = r / 255;
-  const gg = g / 255;
-  const bb = b / 255;
-  const max = Math.max(rr, gg, bb);
-  const min = Math.min(rr, gg, bb);
-  const diff = max - min;
-  let h = 0;
-  if (diff !== 0) {
-    if (max === rr) h = ((gg - bb) / diff) % 6;
-    else if (max === gg) h = (bb - rr) / diff + 2;
-    else h = (rr - gg) / diff + 4;
+type HueRange = { ranges: Array<[number, number]>; minSaturation: number; minValue: number };
+
+export const COLOR_PRESETS: Record<ColorPreset, HueRange> = {
+  blue: { ranges: [[190, 250]], minSaturation: 0.4, minValue: 0.2 },
+  green: { ranges: [[85, 165]], minSaturation: 0.35, minValue: 0.2 },
+  red: { ranges: [[0, 15], [340, 360]], minSaturation: 0.45, minValue: 0.25 },
+  yellow: { ranges: [[40, 70]], minSaturation: 0.45, minValue: 0.35 },
+};
+
+const GRID_COLUMNS = 20;
+const GRID_ROWS = 14;
+const INSET = 0.12;
+const ALIGNED_RATIO = 0.35;
+const MIN_COVERAGE = 0.6;
+
+function hsv(r: number, g: number, b: number) {
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const delta = max - min;
+  let hue = 0;
+  if (delta > 0) {
+    if (max === r) hue = 60 * (((g - b) / delta) % 6);
+    else if (max === g) hue = 60 * ((b - r) / delta + 2);
+    else hue = 60 * ((r - g) / delta + 4);
   }
-  h = Math.round(h * 60);
-  if (h < 0) h += 360;
-  const s = max === 0 ? 0 : diff / max;
-  const v = max;
-  return { h, s, v };
+  if (hue < 0) hue += 360;
+  return { hue, saturation: max === 0 ? 0 : delta / max, value: max / 255 };
 }
 
-export function verifyColorInZone(
-  video: HTMLVideoElement,
+/**
+ * Samples a grid inside the printed placement zone, mapped through the homography,
+ * so the check is done in target space regardless of camera angle.
+ */
+export function measureZone(
+  detection: DetectionResult,
   homography: Homography | null,
-  zoneTopLeft: { x: number; y: number },
-  zoneSize: { width: number; height: number },
-): { ratio: number; status: "aligned" | "not_yet" | "tracking_lost" } {
-  if (!homography) {
-    return { ratio: 0, status: "tracking_lost" };
-  }
-
-  const p = projectPoint(homography, zoneTopLeft);
-  const p2 = projectPoint(homography, {
-    x: zoneTopLeft.x + zoneSize.width,
-    y: zoneTopLeft.y + zoneSize.height,
-  });
-  const x = Math.max(0, Math.min(p.x, p2.x));
-  const y = Math.max(0, Math.min(p.y, p2.y));
-  const width = Math.max(1, Math.abs(p2.x - p.x));
-  const height = Math.max(1, Math.abs(p2.y - p.y));
-
-  const canvas = document.createElement("canvas");
-  canvas.width = Math.floor(width);
-  canvas.height = Math.floor(height);
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return { ratio: 0, status: "not_yet" };
-
-  ctx.drawImage(video, x, y, width, height, 0, 0, canvas.width, canvas.height);
-  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  preset: ColorPreset,
+): { status: VerifyStatus; ratio: number } {
+  if (!homography) return { status: "tracking_lost", ratio: 0 };
+  const { image, scaleX, scaleY } = detection;
+  const range = COLOR_PRESETS[preset];
+  let samples = 0;
   let hits = 0;
-  let total = 0;
-  for (let i = 0; i < imageData.data.length; i += 4) {
-    const { h, s, v } = rgbToHsv(imageData.data[i], imageData.data[i + 1], imageData.data[i + 2]);
-    if (h >= 25 && h <= 90 && s > 0.35 && v > 0.2) hits += 1;
-    total += 1;
+
+  for (let row = 0; row < GRID_ROWS; row += 1) {
+    for (let col = 0; col < GRID_COLUMNS; col += 1) {
+      const u = INSET + ((1 - 2 * INSET) * (col + 0.5)) / GRID_COLUMNS;
+      const v = INSET + ((1 - 2 * INSET) * (row + 0.5)) / GRID_ROWS;
+      const p = projectPoint(homography, {
+        x: VERIFY_ZONE.x + u * VERIFY_ZONE.width,
+        y: VERIFY_ZONE.y + v * VERIFY_ZONE.height,
+      });
+      const x = Math.round(p.x / scaleX);
+      const y = Math.round(p.y / scaleY);
+      if (x < 0 || y < 0 || x >= image.width || y >= image.height) continue;
+      const i = (y * image.width + x) * 4;
+      const color = hsv(image.data[i], image.data[i + 1], image.data[i + 2]);
+      samples += 1;
+      const hueMatch = range.ranges.some(([lo, hi]) => color.hue >= lo && color.hue <= hi);
+      if (hueMatch && color.saturation >= range.minSaturation && color.value >= range.minValue) hits += 1;
+    }
   }
-  const ratio = total ? hits / total : 0;
-  return { ratio, status: ratio > 0.25 ? "aligned" : "not_yet" };
+
+  if (samples < GRID_COLUMNS * GRID_ROWS * MIN_COVERAGE) return { status: "tracking_lost", ratio: 0 };
+  const ratio = hits / samples;
+  return { status: ratio >= ALIGNED_RATIO ? "aligned" : "not_yet", ratio };
 }

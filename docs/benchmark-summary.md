@@ -1,36 +1,32 @@
 # Benchmark Summary
 
-Use this file to record real measurements from live trials. Do not fill with estimated values.
+Only measured values go here. No results have been recorded on real devices yet.
 
 ## Methodology
 
-- Task: same physical assembly task for both conditions.
-- Conditions:
-  - Baseline: video + verbal only
-  - RealityCheck: anchored annotations enabled
-- Minimum trials: 3 per condition.
-- Record per trial:
-  - device models and OS versions
-  - browser versions
-  - lighting notes
-  - target print quality
-  - network type
+- Task: the same physical task in both conditions (e.g. place the part in the printed zone, then follow the demo steps).
+- Conditions, set with the Guided / Baseline toggle in the Bench panel:
+  - Baseline: video and voice only; annotations are hidden.
+  - Guided: anchored annotations, steps, and verification.
+- At least 3 trials per condition, alternating order.
+- Record device models, browsers, lighting, and network in the trial metadata fields.
 
-## Metrics
+## Metrics (collected automatically by the Bench panel)
 
-- Task completion time (seconds)
-- Clarification count (integer)
-- Tracking error (px, mean and p95)
-- Tracking lost-frame percentage
-- Annotation latency (ms)
-- Verification success ratio (if P1 verification used)
+| Column | Meaning |
+| --- | --- |
+| `task_seconds` | timer from Start task to Save trial |
+| `clarifications` | manual counter of "where exactly?" style questions |
+| `tracking_fps`, `detect_ms` | detection rate and mean detection time on the recording device |
+| `lost_frame_percent` | share of processed frames with status "lost" |
+| `tracking_error_*_px`, `tracking_error_*_mm` | reference marker (ID 20): predicted vs detected corners, mean and p95 |
+| `sync_latency_median_ms` | annotation created on one device → received on the other, using server clock offset |
+| `verification_ratio` | share of the zone matching the part colour at save time |
 
-## Raw results
+## Results
 
-Populate `data/raw-results.csv` directly during testing.
+Export from `/bench` and paste the rows into `data/raw-results.csv`. Report medians and ranges per condition, and include failed or outlier trials with a note.
 
-## Reporting notes
+## Development checks (not user trials)
 
-- Report medians and ranges.
-- Include failures and outliers; do not exclude silently.
-- Note any thermal throttling or camera autofocus issues.
+`npm test` renders the target under known poses and checks the projected test-dot error. These are synthetic images, not camera footage, and are not benchmark results.

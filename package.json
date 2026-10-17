@@ -1,46 +1,45 @@
 {
-  "name": "macs26",
+  "name": "realitycheck",
   "version": "1.0.0",
-  "description": "RealityCheck hackathon project",
+  "description": "RealityCheck: object-anchored visual guidance over video calls",
   "private": true,
+  "type": "module",
   "workspaces": [
     "client",
     "shared"
   ],
   "scripts": {
-    "dev": "concurrently -k -n server,client \"npm run dev:server\" \"npm run dev:client\"",
-    "dev:server": "tsx server/src/index.ts",
-    "dev:client": "npm --prefix client run dev -- --host",
-    "build": "npm run build:client",
-    "build:client": "npm --prefix client run build",
-    "target:generate": "tsx scripts/make-target.ts",
+    "dev": "concurrently -k -n server,client -c cyan,magenta \"npm run dev:server\" \"npm run dev:client\"",
+    "dev:server": "tsx watch server/src/index.ts",
+    "dev:client": "npm run dev -w client",
+    "build": "npm run build -w client",
     "start": "NODE_ENV=production tsx server/src/index.ts",
+    "test": "tsx scripts/test-tracking.ts && tsx scripts/test-server.ts",
+    "typecheck": "tsc -p tsconfig.json && tsc -b client",
+    "target:generate": "tsx scripts/make-target.ts",
     "tunnel": "ngrok http 5173"
+  },
+  "engines": {
+    "node": ">=20"
   },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/asehmb/macs-26.git"
   },
-  "keywords": [],
-  "author": "",
   "license": "ISC",
-  "type": "module",
-  "bugs": {
-    "url": "https://github.com/asehmb/macs-26/issues"
-  },
-  "homepage": "https://github.com/asehmb/macs-26#readme",
-  "devDependencies": {
-    "@types/node": "^26.6.5",
-    "aruco-marker": "^3.0.1",
-    "concurrently": "^10.0.6",
-    "pdfkit": "^0.20.2",
-    "svg-to-pdfkit": "^0.1.8",
-    "tsx": "^4.23.15",
-    "typescript": "^7.0.2"
-  },
   "dependencies": {
-    "cors": "^2.8.6",
     "express": "^5.3.0",
-    "socket.io": "^4.8.4"
+    "socket.io": "^4.8.4",
+    "tsx": "^4.23.15"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/node": "^26.6.5",
+    "@types/pdfkit": "^0.17.6",
+    "concurrently": "^10.0.6",
+    "js-aruco2": "^2.0.0",
+    "pdfkit": "^0.20.2",
+    "socket.io-client": "^4.8.4",
+    "typescript": "~6.0.2"
   }
 }
