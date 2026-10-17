@@ -1,4 +1,5 @@
 import express from "express";
+import { mkdir, writeFile } from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import { Server, type Socket } from "socket.io";
@@ -200,6 +201,20 @@ io.on("connection", (socket) => {
 app.get("/healthz", (_req, res) => {
   res.json({ ok: true, rooms: rooms.size, at: Date.now() });
 });
+
+if (process.env.NODE_ENV !== "production") {
+  const debugDir = path.resolve(process.cwd(), ".debug");
+  app.post("/debug/report", express.json({ limit: "8mb" }), async (req, res) => {
+    const { image, ...report } = req.body as { image?: string | null; role?: string };
+    const role = report.role === "presenter" ? "presenter" : "helper";
+    await mkdir(debugDir, { recursive: true });
+    await writeFile(path.join(debugDir, `${role}.json`), JSON.stringify({ at: new Date().toISOString(), ...report }, null, 2));
+    if (image?.startsWith("data:image/jpeg;base64,")) {
+      await writeFile(path.join(debugDir, `${role}.jpg`), Buffer.from(image.split(",")[1], "base64"));
+    }
+    res.sendStatus(204);
+  });
+}
 
 if (process.env.NODE_ENV === "production") {
   app.use(express.static(CLIENT_DIST));

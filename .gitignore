@@ -8,3 +8,4 @@ coverage
 client/dist
 *.log
 .playwright-mcp/
+.debug/

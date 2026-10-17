@@ -84,6 +84,10 @@ export function Room() {
   const lastPoseSentRef = useRef(0);
   const lastVerifyRef = useRef(0);
   const seenAnnotationsRef = useRef<Set<string> | null>(null);
+  const tapLogRef = useRef<string[]>([]);
+  const logTap = (entry: string) => {
+    tapLogRef.current = [...tapLogRef.current.slice(-9), `${new Date().toISOString().slice(11, 23)} ${entry}`];
+  };
 
   const presenter = peers.find((peer) => peer.role === "presenter" && peer.id !== selfId) ?? null;
   const helper = [...peers].reverse().find((peer) => peer.role === "helper" && peer.id !== selfId) ?? null;
@@ -253,6 +257,36 @@ export function Room() {
   );
 
   const tracking = useTracking({ videoRef, useFallbackPose: role === "helper", onFrame });
+  const { snapshot, viewRef: trackingViewRef } = tracking;
+
+  // Dev-only: with debug on, upload what the detector sees so it can be inspected on the laptop.
+  useEffect(() => {
+    if (!import.meta.env.DEV || !debug) return;
+    const timer = window.setInterval(() => {
+      const video = videoRef.current;
+      const view = trackingViewRef.current;
+      const body = {
+        role,
+        userAgent: navigator.userAgent,
+        status: view.status,
+        usingFallback: view.usingFallback,
+        markers: view.markers.map((m) => ({ id: m.id, corners: m.corners.map((c) => [Math.round(c.x), Math.round(c.y)]) })),
+        info: view.info ?? null,
+        video: video
+          ? { width: video.videoWidth, height: video.videoHeight, readyState: video.readyState, paused: video.paused }
+          : null,
+        stage: video?.parentElement ? [video.parentElement.clientWidth, video.parentElement.clientHeight] : null,
+        mode: useRoomStore.getState().state?.mode ?? null,
+        annotations: useRoomStore.getState().state?.annotations.length ?? 0,
+        taps: tapLogRef.current,
+        image: snapshot(),
+      };
+      fetch("/debug/report", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).catch(
+        () => undefined,
+      );
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [debug, role, snapshot, trackingViewRef]);
 
   useEffect(() => {
     if (role !== "helper") return;
@@ -293,6 +327,11 @@ export function Room() {
 
   const placeAnnotation = (point: Vec2) => {
     const located = locate(point);
+    logTap(
+      `place ${tool} at ${point.x.toFixed(0)},${point.y.toFixed(0)} -> ${
+        located?.target ? `${located.target.x.toFixed(1)},${located.target.y.toFixed(1)} mm` : "no target"
+      }`,
+    );
     if (!located?.target) {
       showToast("Can't anchor there: the target isn't being tracked.");
       return;
@@ -329,6 +368,7 @@ export function Room() {
   const canAnnotate = role === "helper" && guided;
 
   const onPointerDown = (point: Vec2) => {
+    logTap(`down ${point.x.toFixed(0)},${point.y.toFixed(0)} canAnnotate=${canAnnotate}`);
     if (!canAnnotate) return;
     pointerDownRef.current = point;
     if (tool === "laser") sendPointer(point, true);
@@ -340,6 +380,7 @@ export function Room() {
     if (!canAnnotate) return;
     const down = pointerDownRef.current;
     pointerDownRef.current = null;
+    logTap(`up ${point.x.toFixed(0)},${point.y.toFixed(0)} hadDown=${Boolean(down)}`);
     if (tool === "laser") {
       sendPointer(null, true);
       return;

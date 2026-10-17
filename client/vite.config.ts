@@ -15,6 +15,7 @@ export default defineConfig({
         ws: true,
       },
       '/healthz': 'http://localhost:3001',
+      '/debug/report': 'http://localhost:3001',
     },
     fs: {
       allow: [new URL('..', import.meta.url).pathname],

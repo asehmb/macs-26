@@ -11,6 +11,15 @@ export type OverlayView = {
   status: TrackingStatus;
   usingFallback: boolean;
   markers: Array<{ id: number; corners: Vec2[] }>;
+  info?: TrackingInfo;
+};
+
+export type TrackingInfo = {
+  videoSize: string;
+  frameSize: string;
+  detectMs: number;
+  fps: number;
+  error: string | null;
 };
 
 type OverlayProps = {
@@ -171,6 +180,19 @@ export function Overlay(props: OverlayProps) {
           ctx.arc(dot.x, dot.y, 12, 0, Math.PI * 2);
           ctx.stroke();
         }
+        const info = view.info;
+        const lines = [
+          `status ${view.status}${view.usingFallback ? " (presenter pose)" : ""}`,
+          `markers [${view.markers.map((m) => m.id).join(",")}]`,
+          info ? `video ${info.videoSize} · detect ${info.frameSize}` : "detector not running",
+          info ? `${info.fps.toFixed(1)} fps · ${info.detectMs.toFixed(0)} ms` : "",
+          info?.error ? `error: ${info.error}` : "",
+        ].filter(Boolean);
+        ctx.font = "600 12px ui-monospace, monospace";
+        ctx.fillStyle = "rgba(2, 6, 23, 0.75)";
+        ctx.fillRect(8, cssHeight - 12 - lines.length * 16, 280, lines.length * 16 + 6);
+        ctx.fillStyle = "#facc15";
+        lines.forEach((line, i) => ctx.fillText(line, 14, cssHeight - 12 - (lines.length - 1 - i) * 16 - 2, 268));
       }
 
       if (p.showVerifyZone && h) {
