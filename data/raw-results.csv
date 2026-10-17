@@ -1,0 +1,1 @@
+timestamp,trial,condition,recorded_on,device_presenter,device_helper,browser,lighting,task_seconds,clarifications,tracking_fps,detect_ms,lost_frame_percent,tracking_error_mean_px,tracking_error_p95_px,tracking_error_mean_mm,tracking_error_p95_mm,sync_latency_median_ms,verification_ratio,notes
