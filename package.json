@@ -1,0 +1,46 @@
+{
+  "name": "macs26",
+  "version": "1.0.0",
+  "description": "RealityCheck hackathon project",
+  "private": true,
+  "workspaces": [
+    "client",
+    "shared"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n server,client \"npm run dev:server\" \"npm run dev:client\"",
+    "dev:server": "tsx server/src/index.ts",
+    "dev:client": "npm --prefix client run dev -- --host",
+    "build": "npm run build:client",
+    "build:client": "npm --prefix client run build",
+    "target:generate": "tsx scripts/make-target.ts",
+    "start": "NODE_ENV=production tsx server/src/index.ts",
+    "tunnel": "ngrok http 5173"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/asehmb/macs-26.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/asehmb/macs-26/issues"
+  },
+  "homepage": "https://github.com/asehmb/macs-26#readme",
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "aruco-marker": "^3.0.1",
+    "concurrently": "^10.0.6",
+    "pdfkit": "^0.20.2",
+    "svg-to-pdfkit": "^0.1.8",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "cors": "^2.8.6",
+    "express": "^5.3.0",
+    "socket.io": "^4.8.4"
+  }
+}

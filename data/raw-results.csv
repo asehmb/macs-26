@@ -1,0 +1,1 @@
+timestamp,condition,device_presenter,device_helper,browser_presenter,browser_helper,lighting,task_seconds,clarifications,tracking_error_mean_px,tracking_error_p95_px,lost_frame_percent,annotation_latency_ms,verification_ratio,notes
