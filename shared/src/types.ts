@@ -98,3 +98,57 @@ export type SignalMessage =
   | { kind: "answer"; sid: string; sdp: RTCSessionDescriptionInit }
   | { kind: "candidate"; sid: string; candidate: RTCIceCandidateInit }
   | { kind: "request-offer" };
+
+export type User = {
+  id: string;
+  username: string;
+  displayName: string;
+  createdAt: number;
+  lastSeen: number;
+};
+
+export type FriendStatus = "online" | "in-call" | "offline";
+
+export type Friend = {
+  id: string;
+  username: string;
+  displayName: string;
+  friendSince: number;
+  lastSeen: number;
+  status: FriendStatus;
+};
+
+export type FriendRequest = {
+  id: string;
+  fromUserId: string;
+  toUserId: string;
+  fromUsername: string;
+  fromDisplayName: string;
+  status: "pending" | "accepted" | "declined";
+  createdAt: number;
+};
+
+export type CallRecord = {
+  id: string;
+  callerId: string;
+  receiverId: string;
+  callerUsername: string;
+  callerDisplayName: string;
+  receiverUsername: string;
+  receiverDisplayName: string;
+  status: "ringing" | "accepted" | "declined" | "missed" | "ended";
+  startedAt: number;
+  endedAt: number | null;
+  durationSec: number | null;
+};
+
+export type IncomingCall = {
+  callId: string;
+  caller: {
+    id: string;
+    username: string;
+    displayName: string;
+  };
+  role: Role;
+};
+

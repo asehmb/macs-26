@@ -7,5 +7,6 @@ dist
 coverage
 client/dist
 *.log
+*.db*
 .playwright-mcp/
 .debug/
