@@ -123,4 +123,7 @@ export function stopAllSounds(): void {
     }
   }
   activeOscillators = [];
+  // A running context keeps iOS's audio session in playback mode, which interferes with starting the camera and
+  // mic for the call. Suspend rather than close so the context stays unlocked for the next ring.
+  if (audioCtx?.state === "running") audioCtx.suspend().catch(() => undefined);
 }

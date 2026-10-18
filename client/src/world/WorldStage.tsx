@@ -30,6 +30,7 @@ export function WorldStage({ annotationsRef, onStream, onPhase, onUseSheet, fake
   const sessionRef = useRef<WorldSession | null>(null);
   const micRef = useRef<MediaStream | null>(null);
   const [phase, setPhase] = useState<WorldPhase>("idle");
+  const phaseRef = useRef<{ phase: WorldPhase; message: string | null }>({ phase: "idle", message: null });
   const [message, setMessage] = useState<string | null>(null);
   const [unplaceable, setUnplaceable] = useState(0);
   const callbacks = useRef({ onStream, onPhase });
@@ -60,23 +61,35 @@ export function WorldStage({ annotationsRef, onStream, onPhase, onUseSheet, fake
   const drawRef = useRef(drawAnnotations);
   drawRef.current = drawAnnotations;
 
+  /** Once the camera runs: ask for the mic (asking earlier can stop iOS from starting the camera), then go live. */
+  const publish = async (session: WorldSession) => {
+    if (!micRef.current) {
+      micRef.current = await navigator.mediaDevices
+        .getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } })
+        .catch(() => null);
+    }
+    if (sessionRef.current !== session || !session.stream) return;
+    const tracks = [...session.stream.getVideoTracks(), ...(micRef.current?.getAudioTracks() ?? [])];
+    callbacks.current.onStream(new MediaStream(tracks));
+  };
+
   const start = async () => {
     sessionRef.current?.stop();
+    let published = false;
     const session = new WorldSession(canvasRef.current!, {
       onPhase: (next, text) => {
+        phaseRef.current = { phase: next, message: text ?? null };
         setPhase(next);
         setMessage(text ?? null);
         callbacks.current.onPhase(next);
+        if (next === "running" && !published) {
+          published = true;
+          void publish(session);
+        }
       },
       drawComposite: (...args) => drawRef.current(...args),
       loadEngine: fake ? () => import("./fakeXr8").then((m) => m.loadFakeXR8()) : undefined,
       tagFrames: true,
-      beforeEngine: async () => {
-        if (micRef.current) return;
-        micRef.current = await navigator.mediaDevices
-          .getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } })
-          .catch(() => null);
-      },
     });
     sessionRef.current = session;
     session.isActive = (id) => {
@@ -85,9 +98,6 @@ export function WorldStage({ annotationsRef, onStream, onPhase, onUseSheet, fake
       return (annotationsRef.current ?? []).some((a) => a.world?.start === id || a.world?.end === id);
     };
     await session.start();
-    if (sessionRef.current !== session || !session.stream) return;
-    const tracks = [...session.stream.getVideoTracks(), ...(micRef.current?.getAudioTracks() ?? [])];
-    callbacks.current.onStream(new MediaStream(tracks));
   };
 
   // Answer helpers' taps with tracked points.
@@ -177,6 +187,7 @@ export function WorldStage({ annotationsRef, onStream, onPhase, onUseSheet, fake
           role: "presenter",
           userAgent: navigator.userAgent,
           tracking: "world",
+          phase: phaseRef.current,
           stats: session?.stats ?? null,
           reality: summarizeReality(session?.reality ?? null),
           points: session ? [...session.tracker.points.values()].map(serializePoint) : [],
