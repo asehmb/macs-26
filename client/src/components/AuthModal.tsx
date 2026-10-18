@@ -64,6 +64,7 @@ export function AuthModal() {
               type="text"
               placeholder="e.g. alex"
               value={username}
+              minLength={3}
               autoCapitalize="none"
               autoCorrect="off"
               required
@@ -85,12 +86,13 @@ export function AuthModal() {
           )}
 
           <div className="form-group">
-            <label htmlFor="authPassword">Password</label>
+            <label htmlFor="authPassword">Password {isRegister && <span style={{ color: "#8e8e93", fontSize: "0.75rem" }}>(min 4 chars)</span>}</label>
             <input
               id="authPassword"
               type="password"
               placeholder="••••••••"
               value={password}
+              minLength={4}
               required
               onChange={(e) => setPassword(e.target.value)}
             />

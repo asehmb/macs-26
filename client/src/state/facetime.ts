@@ -249,9 +249,15 @@ export const useFaceTimeStore = create<FaceTimeStore>((set, get) => {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ username, password }),
         });
-        const data = await res.json();
+        const data = await res.json().catch(() => null);
         if (!res.ok) {
-          set({ authError: data.error || "Login failed" });
+          set({
+            authError:
+              data?.error ||
+              (res.status === 404
+                ? "Backend server unreachable. Make sure the server is running."
+                : "Login failed"),
+          });
           return false;
         }
         localStorage.setItem(TOKEN_KEY, data.token);
@@ -269,15 +275,29 @@ export const useFaceTimeStore = create<FaceTimeStore>((set, get) => {
 
     register: async (username, password, displayName) => {
       set({ authError: null });
+      if (password.length < 4) {
+        set({ authError: "Password must be at least 4 characters" });
+        return false;
+      }
+      if (username.length < 3) {
+        set({ authError: "Username must be at least 3 characters" });
+        return false;
+      }
       try {
         const res = await fetch("/api/auth/register", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ username, password, displayName }),
         });
-        const data = await res.json();
+        const data = await res.json().catch(() => null);
         if (!res.ok) {
-          set({ authError: data.error || "Registration failed" });
+          set({
+            authError:
+              data?.error ||
+              (res.status === 404
+                ? "Backend server unreachable. Make sure the server is running."
+                : "Registration failed"),
+          });
           return false;
         }
         localStorage.setItem(TOKEN_KEY, data.token);
