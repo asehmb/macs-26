@@ -21,11 +21,6 @@ type Options = {
   onReality?: (reality: Reality) => void;
   /** Development harness that renders a synthetic scene instead of running the engine. */
   loadEngine?: () => Promise<XR8Api>;
-  /**
-   * Runs after motion permission and before the camera starts - e.g. to ask for the microphone, whose permission
-   * prompt would otherwise interrupt tracking while it builds its first map.
-   */
-  beforeEngine?: () => Promise<void>;
   /** Stamp outgoing frames with a frame number so remote taps can be resolved against the frame the helper saw. */
   tagFrames?: boolean;
 };
@@ -36,6 +31,8 @@ const VISION_WIDTH = 360;
 const VISION_INTERVAL_MS = 66;
 /** Tracking state of recent outgoing frames, covering the video delay to the helper. */
 const HISTORY_FRAMES = 120;
+/** The engine reports nothing if the camera never delivers frames, so give up and offer a retry. */
+const CAMERA_START_TIMEOUT_MS = 12_000;
 
 type FrameState = Pick<Reality, "position" | "rotation" | "intrinsics" | "trackingStatus" | "trackingReason" | "worldPoints">;
 
@@ -48,7 +45,7 @@ export class WorldSession {
   reality: Reality | null = null;
   stream: MediaStream | null = null;
   composite: HTMLCanvasElement | null = null;
-  stats = { engineFps: 0, visionMs: 0 };
+  stats = { engineFps: 0, visionMs: 0, camera: "not requested" };
   /** Limits snapping to points that are currently shown. */
   isActive: (id: string) => boolean = () => true;
 
@@ -57,6 +54,7 @@ export class WorldSession {
   /** Shared with the tracker; sized once the view's aspect is known. */
   private visionInfo = { width: VISION_WIDTH, height: VISION_WIDTH, grab: () => this.grabVision() };
   private stopped = false;
+  private startTimer = 0;
   private frame = 0;
   private history = new Map<number, FrameState>();
 
@@ -79,7 +77,6 @@ export class WorldSession {
         const motion = await requestMotionPermission();
         if (motion !== "granted") throw new Error("Motion & orientation access was denied. World tracking needs it.");
       }
-      await this.options.beforeEngine?.();
       const XR8 = await (this.options.loadEngine ?? loadXR8)();
       await XR8.loadChunk("slam");
       if (this.stopped) return;
@@ -92,6 +89,7 @@ export class WorldSession {
 
   stop() {
     this.stopped = true;
+    window.clearTimeout(this.startTimer);
     try {
       this.xr?.stop();
       this.xr?.clearCameraPipelineModules();
@@ -180,6 +178,7 @@ export class WorldSession {
         },
         onCanvasSizeChange: ({ canvasWidth, canvasHeight }) => updateProjection(canvasWidth, canvasHeight),
         onUpdate: ({ processCpuResult }) => {
+          window.clearTimeout(this.startTimer);
           const reality = processCpuResult.reality;
           if (reality) {
             this.reality = reality;
@@ -227,6 +226,7 @@ export class WorldSession {
           if (!this.reality) onPhase("error", `Tracking engine error: ${error instanceof Error ? error.message : String(error)}`);
         },
         onCameraStatusChange: ({ status }) => {
+          this.stats.camera = status;
           if (status === "failed") onPhase("error", "The camera failed to start. Check camera permission for this site.");
         },
       },
@@ -236,6 +236,13 @@ export class WorldSession {
     const track = this.stream.getVideoTracks()[0];
     if (track) track.contentHint = "motion";
 
+    this.startTimer = window.setTimeout(() => {
+      if (this.stopped) return;
+      onPhase(
+        "error",
+        `The camera didn't start (camera: ${this.stats.camera}). Close other apps or tabs using the camera, then tap Start camera again.`,
+      );
+    }, CAMERA_START_TIMEOUT_MS);
     XR8.run({
       canvas,
       allowedDevices: this.options.loadEngine ? XR8.XrConfig.device().ANY : XR8.XrConfig.device().MOBILE,
