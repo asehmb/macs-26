@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { io, type Socket } from "socket.io-client";
-import type { PeerInfo, RoomState } from "../shared/src/types.ts";
+import type { PeerInfo, RoomState, WorldResolveResult } from "../shared/src/types.ts";
 
 const PORT = 3999;
 const URL = `http://localhost:${PORT}`;
@@ -55,6 +55,7 @@ try {
   presenter.emit("room:join", { code: "test1", role: "presenter" });
   const initial = await presenterState;
   check("join returns room state", initial?.code === "TEST1" && initial.mode === "guided");
+  check("rooms default to world tracking", initial?.tracking === "world" && initial.helperCamera === false);
 
   const helper = await connect();
   const helperPeers = next<PeerInfo[]>(helper, "room:peers", (p) => p.length === 2);
@@ -109,12 +110,36 @@ try {
   check("pose relays to helper", Array.isArray((await pose)?.homography));
   check("pose is not echoed to sender", (await echo) === null);
 
+  presenter.once("world:resolve", (request: { point: { x: number } }, ack: (result: WorldResolveResult) => void) =>
+    ack(request.point.x === 0.25 ? { ok: true, id: "p1" } : { ok: false, reason: "bad point" }),
+  );
+  const resolved = await new Promise<WorldResolveResult>((resolve) =>
+    helper.emit("world:resolve", { point: { x: 0.25, y: 0.5 } }, resolve),
+  );
+  check("world tap is resolved by the presenter and answered", resolved.ok && resolved.id === "p1");
+
+  const sheet = next<RoomState>(helper, "state:sync", (s) => s.tracking === "sheet" && s.helperCamera);
+  presenter.emit("tracking:set", { tracking: "sheet" });
+  helper.emit("media:camera", { on: true });
+  check("tracking mode and helper camera flag sync", Boolean(await sheet));
+
   const serverTime = await new Promise<number>((resolve) => presenter.emit("clock:ping", resolve));
   check("clock ping acks server time", Math.abs(serverTime - Date.now()) < 1000);
 
   const leftPeers = next<PeerInfo[]>(presenter, "room:peers", (p) => p.length === 1);
+  const cameraCleared = next<RoomState>(presenter, "state:sync", (s) => !s.helperCamera);
   helper.disconnect();
   check("peer list updates on disconnect", Boolean(await leftPeers));
+  check("helper camera flag clears when the helper leaves", Boolean(await cameraCleared));
+
+  const noPresenter = await connect();
+  noPresenter.emit("room:join", { code: "LONELY", role: "helper" });
+  await next(noPresenter, "state:sync");
+  const unanswered = await new Promise<WorldResolveResult>((resolve) =>
+    noPresenter.emit("world:resolve", { point: { x: 0.5, y: 0.5 } }, resolve),
+  );
+  check("world tap without a presenter fails cleanly", !unanswered.ok);
+  noPresenter.disconnect();
 
   const rejoin = await connect();
   const restored = next<RoomState>(rejoin, "state:sync");

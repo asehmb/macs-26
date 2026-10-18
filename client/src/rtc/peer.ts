@@ -113,6 +113,7 @@ export class PresenterLink extends Link {
     send: Send,
     onState: (state: RTCPeerConnectionState | "idle") => void,
     private onRemoteAudio: (stream: MediaStream | null) => void,
+    private onRemoteVideo: (stream: MediaStream | null) => void = () => undefined,
   ) {
     super(send, onState);
   }
@@ -138,8 +139,9 @@ export class PresenterLink extends Link {
     const audio = this.stream?.getAudioTracks()[0];
     if (video) video.contentHint = "detail";
 
+    // sendrecv so the helper can answer with their webcam (picture-in-picture) without renegotiating.
     const videoTransceiver = pc.addTransceiver(video ?? "video", {
-      direction: "sendonly",
+      direction: "sendrecv",
       streams,
       sendEncodings: [{ maxBitrate: VIDEO_MAX_BITRATE }],
     });
@@ -149,6 +151,7 @@ export class PresenterLink extends Link {
 
     pc.ontrack = (event) => {
       if (event.track.kind === "audio") this.onRemoteAudio(new MediaStream([event.track]));
+      else this.onRemoteVideo(new MediaStream([event.track]));
     };
     pc.addEventListener("connectionstatechange", () => {
       if (this.pc !== pc) return;
@@ -204,12 +207,15 @@ export class PresenterLink extends Link {
     this.audioSender = null;
     super.close();
     this.onRemoteAudio?.(null);
+    this.onRemoteVideo?.(null);
   }
 }
 
 export class HelperLink extends Link {
   private micTrack: MediaStreamTrack | null = null;
+  private cameraTrack: MediaStreamTrack | null = null;
   private audioSender: RTCRtpSender | null = null;
+  private videoSender: RTCRtpSender | null = null;
 
   constructor(
     send: Send,
@@ -222,6 +228,11 @@ export class HelperLink extends Link {
   setMicTrack(track: MediaStreamTrack | null) {
     this.micTrack = track;
     this.audioSender?.replaceTrack(track).catch(() => undefined);
+  }
+
+  setCameraTrack(track: MediaStreamTrack | null) {
+    this.cameraTrack = track;
+    this.videoSender?.replaceTrack(track).catch(() => undefined);
   }
 
   requestOffer(presenterId: string) {
@@ -244,7 +255,9 @@ export class HelperLink extends Link {
           this.audioSender = transceiver.sender;
           await transceiver.sender.replaceTrack(this.micTrack).catch(() => undefined);
         } else {
-          transceiver.direction = "recvonly";
+          transceiver.direction = "sendrecv";
+          this.videoSender = transceiver.sender;
+          await transceiver.sender.replaceTrack(this.cameraTrack).catch(() => undefined);
         }
       }
       const answer = await pc.createAnswer();
@@ -259,6 +272,7 @@ export class HelperLink extends Link {
 
   close() {
     this.audioSender = null;
+    this.videoSender = null;
     super.close();
     this.onRemoteStream?.(null);
   }

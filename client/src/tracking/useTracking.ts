@@ -15,10 +15,14 @@ export type TrackerState = TrackingStatus | "loading" | "error";
 type Options = {
   videoRef: RefObject<HTMLVideoElement | null>;
   useFallbackPose: boolean;
+  /** Off in world tracking mode, where there is no printed target to detect. */
+  enabled?: boolean;
   onFrame?: (detection: DetectionResult, frame: TrackingFrame) => void;
 };
 
-export function useTracking({ videoRef, useFallbackPose, onFrame }: Options) {
+export function useTracking({ videoRef, useFallbackPose, enabled = true, onFrame }: Options) {
+  const enabledRef = useRef(enabled);
+  enabledRef.current = enabled;
   const viewRef = useRef<OverlayView>({ homography: null, status: "lost", usingFallback: false, markers: [] });
   const trackerRef = useRef(new TargetTracker());
   const detectorRef = useRef<FrameDetector | null>(null);
@@ -61,7 +65,7 @@ export function useTracking({ videoRef, useFallbackPose, onFrame }: Options) {
           raf = requestAnimationFrame(tick);
           const video = videoRef.current;
           const interval = avgDetectMs > SLOW_DETECT_MS ? SLOW_INTERVAL_MS : FAST_INTERVAL_MS;
-          if (!video || video.readyState < 2 || now - lastRun < interval) return;
+          if (!enabledRef.current || !video || video.readyState < 2 || now - lastRun < interval) return;
           lastRun = now;
           recentRuns.push(now);
           while (recentRuns.length && now - recentRuns[0] > 1000) recentRuns.shift();

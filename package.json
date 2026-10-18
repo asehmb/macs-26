@@ -14,7 +14,7 @@
     "dev:client": "npm run dev -w client",
     "build": "npm run build -w client",
     "start": "NODE_ENV=production tsx server/src/index.ts",
-    "test": "tsx scripts/test-tracking.ts && tsx scripts/test-server.ts",
+    "test": "tsx scripts/test-tracking.ts && tsx scripts/test-world-math.ts && tsx scripts/test-patch.ts && tsx scripts/test-server.ts",
     "typecheck": "tsc -p tsconfig.json && tsc -b client",
     "target:generate": "tsx scripts/make-target.ts",
     "tunnel": "ngrok http 5173"

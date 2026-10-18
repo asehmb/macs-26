@@ -86,6 +86,14 @@ export function useCamera({ synthetic = false }: { synthetic?: boolean } = {}) {
     }
   }, [synthetic]);
 
+  const stop = useCallback(() => {
+    requestRef.current += 1;
+    stopTracks();
+    setStream(null);
+    setStatus("idle");
+    setError(null);
+  }, []);
+
   const switchCamera = useCallback(
     () => start(facingRef.current === "environment" ? "user" : "environment"),
     [start],
@@ -99,5 +107,5 @@ export function useCamera({ synthetic = false }: { synthetic?: boolean } = {}) {
     [],
   );
 
-  return { stream, status, error, facingMode, start, switchCamera };
+  return { stream, status, error, facingMode, start, stop, switchCamera };
 }

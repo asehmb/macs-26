@@ -10,6 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@8thwall/engine-binary": "^1.0.0",
     "js-aruco2": "^2.0.0",
     "qrcode.react": "^4.2.0",
     "react": "^19.2.8",

@@ -11,10 +11,17 @@ import type {
   RoomState,
   SignalMessage,
   Step,
+  TrackingMode,
   VerifyReport,
+  WorldResolveRequest,
+  WorldResolveResult,
+  WorldStatus,
 } from "../../../shared/src/types";
 
 type SignalHandler = (from: string, data: SignalMessage) => void;
+type WorldResolver = (request: WorldResolveRequest) => WorldResolveResult;
+
+const WORLD_RESOLVE_TIMEOUT_MS = 4000;
 
 type RoomStore = {
   socket: Socket | null;
@@ -28,6 +35,7 @@ type RoomStore = {
   pointer: PointerState | null;
   poseFallback: PoseFallback | null;
   verifyReport: VerifyReport | null;
+  worldStatus: WorldStatus | null;
   /** serverTime ≈ Date.now() + clockOffset */
   clockOffset: number;
   connect: (roomCode: string, role: Role) => void;
@@ -47,9 +55,17 @@ type RoomStore = {
   sendVerifyReport: (report: VerifyReport) => void;
   sendPointer: (pointer: PointerState) => void;
   sendPoseFallback: (pose: PoseFallback) => void;
+  setTracking: (tracking: TrackingMode) => void;
+  setHelperCamera: (on: boolean) => void;
+  sendWorldStatus: (status: WorldStatus) => void;
+  /** Helper: ask the presenter's phone to turn a tap on its video into a tracked 3D point. */
+  resolveWorldPoint: (request: WorldResolveRequest) => Promise<WorldResolveResult>;
+  /** Presenter: answer helpers' world taps. Only one resolver is active at a time. */
+  setWorldResolver: (resolver: WorldResolver | null) => void;
 };
 
 const signalHandlers = new Set<SignalHandler>();
+let worldResolver: WorldResolver | null = null;
 
 async function measureClockOffset(socket: Socket): Promise<number | null> {
   let best: { rtt: number; offset: number } | null = null;
@@ -81,6 +97,7 @@ export const useRoomStore = create<RoomStore>((set, get) => {
     pointer: null,
     poseFallback: null,
     verifyReport: null,
+    worldStatus: null,
     clockOffset: 0,
 
     connect: (roomCode, role) => {
@@ -103,6 +120,15 @@ export const useRoomStore = create<RoomStore>((set, get) => {
       socket.on("pointer:move", (pointer: PointerState) => set({ pointer: { ...pointer, ts: Date.now() } }));
       socket.on("pose:fallback", (pose: PoseFallback) => set({ poseFallback: { ...pose, ts: Date.now() } }));
       socket.on("verify:report", (report: VerifyReport) => set({ verifyReport: { ...report, ts: Date.now() } }));
+      socket.on("world:status", (status: WorldStatus) => set({ worldStatus: { ...status, ts: Date.now() } }));
+      socket.on("world:resolve", (request: WorldResolveRequest, ack: (result: WorldResolveResult) => void) => {
+        if (typeof ack !== "function") return;
+        try {
+          ack(worldResolver?.(request) ?? { ok: false, reason: "World tracking isn't running on the presenter's phone." });
+        } catch (error) {
+          ack({ ok: false, reason: error instanceof Error ? error.message : String(error) });
+        }
+      });
       socket.on("signal", ({ from, data }: { from: string; data: SignalMessage }) => {
         signalHandlers.forEach((handler) => handler(from, data));
       });
@@ -116,6 +142,7 @@ export const useRoomStore = create<RoomStore>((set, get) => {
         pointer: null,
         poseFallback: null,
         verifyReport: null,
+        worldStatus: null,
       });
     },
 
@@ -143,5 +170,21 @@ export const useRoomStore = create<RoomStore>((set, get) => {
     sendVerifyReport: (report) => get().socket?.volatile.emit("verify:report", report),
     sendPointer: (pointer) => get().socket?.volatile.emit("pointer:move", pointer),
     sendPoseFallback: (pose) => get().socket?.volatile.emit("pose:fallback", pose),
+    setTracking: (tracking) => emit("tracking:set", { tracking }),
+    setHelperCamera: (on) => emit("media:camera", { on }),
+    sendWorldStatus: (status) => get().socket?.volatile.emit("world:status", status),
+    resolveWorldPoint: (request) =>
+      new Promise((resolve) => {
+        const socket = get().socket;
+        if (!socket?.connected) return resolve({ ok: false, reason: "Not connected to the server." });
+        socket
+          .timeout(WORLD_RESOLVE_TIMEOUT_MS)
+          .emit("world:resolve", request, (error: Error | null, result: WorldResolveResult) =>
+            resolve(error || !result ? { ok: false, reason: "The presenter's phone didn't answer." } : result),
+          );
+      }),
+    setWorldResolver: (resolver) => {
+      worldResolver = resolver;
+    },
   };
 });

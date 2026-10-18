@@ -74,15 +74,18 @@ export function Home() {
         <h2>Before the demo</h2>
         <ol>
           <li>
-            Print the <a href="/target.pdf" target="_blank" rel="noreferrer">tracking target</a> at 100% / actual size,
-            and check that the scale bar measures 100 mm.
+            Rooms use world tracking on the presenter's phone: no printed sheet needed. Tap Start, then move the phone
+            slowly around the object for a few seconds. Good light and textured surfaces help.
           </li>
-          <li>Lay it flat in good, even light.</li>
           <li>
-            Use <strong>Show debug</strong> in the room: the red ring should sit on the printed test dot while you move the phone.
+            For the printed-sheet fallback (and the benchmark), print the{" "}
+            <a href="/target.pdf" target="_blank" rel="noreferrer">tracking target</a> at 100% / actual size, check that
+            the scale bar measures 100 mm, and tap <strong>Use printed sheet</strong> on the presenter.
           </li>
         </ol>
         <Link to="/bench">Benchmark trials</Link>
+        {" · "}
+        <Link to="/world-spike">World tracking test (no printed sheet)</Link>
       </section>
     </main>
   );

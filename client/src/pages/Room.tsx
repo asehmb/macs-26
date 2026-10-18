@@ -18,6 +18,9 @@ import { invertHomography, projectPoint, scaleHomography } from "../tracking/hom
 import type { TrackingFrame } from "../tracking/tracker";
 import { useTracking } from "../tracking/useTracking";
 import { measureZone } from "../tracking/verify";
+import { readTag } from "../world/frameTag";
+import type { WorldPhase } from "../world/session";
+import { WorldStage } from "../world/WorldStage";
 
 type LinkState = RTCPeerConnectionState | "idle";
 
@@ -33,6 +36,15 @@ const TRACKING_LABEL = {
   holding: "Target tracked",
   lost: "Target lost",
 } as const;
+
+const WORLD_PHASE_LABEL: Record<WorldPhase, string> = {
+  idle: "World tracking off",
+  starting: "World tracking starting",
+  running: "World tracking",
+  error: "World tracking failed",
+};
+
+const WORLD_STATUS_MAX_AGE_MS = 3000;
 
 function linkLabel(state: LinkState) {
   if (state === "connected") return "Video connected";
@@ -54,9 +66,12 @@ export function Room() {
   const selfId = useRoomStore((s) => s.selfId);
 
   const synthetic = searchParams.get("synthetic") === "1";
+  const fakeWorld = import.meta.env.DEV && searchParams.get("fakeworld") === "1";
   const camera = useCamera({ synthetic });
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const pipRef = useRef<HTMLVideoElement | null>(null);
+  const selfViewRef = useRef<HTMLVideoElement | null>(null);
   const presenterLinkRef = useRef<PresenterLink | null>(null);
   const helperLinkRef = useRef<HelperLink | null>(null);
   const recorder = useMemo(() => new StatsRecorder(), []);
@@ -67,6 +82,10 @@ export function Room() {
   const [needsSoundTap, setNeedsSoundTap] = useState(false);
   const [micStream, setMicStream] = useState<MediaStream | null>(null);
   const [micError, setMicError] = useState<string | null>(null);
+  const [helperCamStream, setHelperCamStream] = useState<MediaStream | null>(null);
+  const [remoteHelperVideo, setRemoteHelperVideo] = useState<MediaStream | null>(null);
+  const [worldStream, setWorldStream] = useState<MediaStream | null>(null);
+  const [worldPhase, setWorldPhase] = useState<WorldPhase>("idle");
   const [debug, setDebug] = useState(false);
   const [showZone, setShowZone] = useState(true);
   const [tool, setTool] = useState<Tool>("pin");
@@ -78,6 +97,7 @@ export function Room() {
   const annotationsRef = useRef<Annotation[]>([]);
   const localPointerRef = useRef<PointerState | null>(null);
   const pendingArrowRef = useRef<Vec2 | null>(null);
+  const pendingWorldRef = useRef<string | null>(null);
   const verifyStatusRef = useRef<VerifyStatus | null>(null);
   const pointerDownRef = useRef<Vec2 | null>(null);
   const lastPointerSentRef = useRef(0);
@@ -93,7 +113,11 @@ export function Room() {
   const helper = [...peers].reverse().find((peer) => peer.role === "helper" && peer.id !== selfId) ?? null;
   const partnerPresent = role === "presenter" ? Boolean(helper) : Boolean(presenter);
   const guided = state?.mode !== "baseline";
-  const mirrored = role === "presenter" && camera.facingMode === "user";
+  const world = state ? state.tracking === "world" : null;
+  const presenterWorld = role === "presenter" && world === true;
+  const mirrored = role === "presenter" && !presenterWorld && camera.facingMode === "user";
+  const outgoing = presenterWorld ? worldStream : camera.stream;
+  const worldStatus = useRoomStore((s) => s.worldStatus);
 
   const showToast = useCallback((message: string) => {
     setToast(message);
@@ -106,17 +130,30 @@ export function Room() {
     return () => useRoomStore.getState().disconnect();
   }, [roomCode, role]);
 
+  // The synthetic test camera (and ?tracking=sheet) can only be tracked with the printed sheet.
+  const askedForSheetRef = useRef(false);
   useEffect(() => {
-    if (role === "presenter") camera.start();
-    // camera.start is stable; only auto-start once per role.
+    if (role !== "presenter" || !state || askedForSheetRef.current) return;
+    askedForSheetRef.current = true;
+    if ((synthetic || searchParams.get("tracking") === "sheet") && state.tracking !== "sheet") {
+      useRoomStore.getState().setTracking("sheet");
+    }
+  }, [role, state, synthetic, searchParams]);
+
+  // Sheet mode uses the plain camera; world mode hands the camera to the tracking engine (started by a tap).
+  useEffect(() => {
+    if (role !== "presenter" || world === null) return;
+    if (world) camera.stop();
+    else camera.start();
+    // camera.start/stop are stable; react to the tracking mode only.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [role]);
+  }, [role, world]);
 
   // WebRTC links, one per role, fed by the signalling channel.
   useEffect(() => {
     const { sendSignal, onSignal } = useRoomStore.getState();
     if (role === "presenter") {
-      const link = new PresenterLink(sendSignal, setLinkState, setRemoteAudio);
+      const link = new PresenterLink(sendSignal, setLinkState, setRemoteAudio, setRemoteHelperVideo);
       presenterLinkRef.current = link;
       const off = onSignal((from, data) => void link.handleSignal(from, data).catch(console.warn));
       return () => {
@@ -136,8 +173,8 @@ export function Room() {
   }, [role]);
 
   useEffect(() => {
-    presenterLinkRef.current?.setStream(camera.stream);
-  }, [camera.stream]);
+    presenterLinkRef.current?.setStream(outgoing);
+  }, [outgoing]);
 
   useEffect(() => {
     const link = presenterLinkRef.current;
@@ -146,17 +183,34 @@ export function Room() {
       if (link.peerId) link.close();
       return;
     }
-    if (camera.stream && link.peerId !== helper.id) {
-      link.setStream(camera.stream);
+    if (outgoing && link.peerId !== helper.id) {
+      link.setStream(outgoing);
       link.connectTo(helper.id).catch(console.warn);
     }
-  }, [role, helper?.id, camera.stream]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [role, helper?.id, outgoing]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     helperLinkRef.current?.setMicTrack(micStream?.getAudioTracks()[0] ?? null);
   }, [micStream]);
 
   useEffect(() => () => micStream?.getTracks().forEach((track) => track.stop()), [micStream]);
+
+  useEffect(() => {
+    helperLinkRef.current?.setCameraTrack(helperCamStream?.getVideoTracks()[0] ?? null);
+    if (selfViewRef.current) selfViewRef.current.srcObject = helperCamStream;
+    if (role === "helper") useRoomStore.getState().setHelperCamera(Boolean(helperCamStream));
+  }, [helperCamStream, role]);
+
+  useEffect(() => () => helperCamStream?.getTracks().forEach((track) => track.stop()), [helperCamStream]);
+
+  // The helper's webcam, picture-in-picture on the presenter's screen.
+  const showHelperPip = role === "presenter" && Boolean(state?.helperCamera && remoteHelperVideo);
+  useEffect(() => {
+    const pip = pipRef.current;
+    if (!pip) return;
+    if (pip.srcObject !== remoteHelperVideo) pip.srcObject = remoteHelperVideo;
+    if (remoteHelperVideo) pip.play().catch(() => undefined);
+  }, [remoteHelperVideo, showHelperPip]);
 
   // Media elements.
   useEffect(() => {
@@ -189,6 +243,23 @@ export function Room() {
     }
     audioRef.current?.play().catch(() => undefined);
     setNeedsSoundTap(false);
+  };
+
+  const toggleHelperCamera = async () => {
+    if (helperCamStream) {
+      setHelperCamStream(null);
+      return;
+    }
+    try {
+      setMicError(null);
+      setHelperCamStream(
+        await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 24 } },
+        }),
+      );
+    } catch {
+      setMicError("Camera permission was denied.");
+    }
   };
 
   const toggleMic = async () => {
@@ -256,12 +327,12 @@ export function Room() {
     [role, recorder],
   );
 
-  const tracking = useTracking({ videoRef, useFallbackPose: role === "helper", onFrame });
+  const tracking = useTracking({ videoRef, useFallbackPose: role === "helper", enabled: world === false, onFrame });
   const { snapshot, viewRef: trackingViewRef } = tracking;
 
   // Dev-only: with debug on, upload what the detector sees so it can be inspected on the laptop.
   useEffect(() => {
-    if (!import.meta.env.DEV || !debug) return;
+    if (!import.meta.env.DEV || !debug || presenterWorld) return;
     const timer = window.setInterval(() => {
       const video = videoRef.current;
       const view = trackingViewRef.current;
@@ -279,14 +350,14 @@ export function Room() {
         mode: useRoomStore.getState().state?.mode ?? null,
         annotations: useRoomStore.getState().state?.annotations.length ?? 0,
         taps: tapLogRef.current,
-        image: snapshot(),
+        image: world ? videoFrame(video) : snapshot(),
       };
       fetch("/debug/report", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).catch(
         () => undefined,
       );
     }, 2000);
     return () => window.clearInterval(timer);
-  }, [debug, role, snapshot, trackingViewRef]);
+  }, [debug, role, snapshot, trackingViewRef, presenterWorld, world]);
 
   useEffect(() => {
     if (role !== "helper") return;
@@ -325,7 +396,59 @@ export function Room() {
     useRoomStore.getState().sendPointer(pointer);
   };
 
+  /** World mode: the presenter's phone resolves the tap into a tracked 3D point and draws it into its video. */
+  const placeWorldAnnotation = async (point: Vec2) => {
+    const located = locate(point);
+    const text = draftText.trim();
+    if (!located?.normalized) {
+      showToast("Tap on the video.");
+      return;
+    }
+    if (tool === "text" && !text) {
+      showToast("Type the instruction first, then tap where it goes.");
+      return;
+    }
+    const frame = videoRef.current ? readTag(videoRef.current) : null;
+    const store = useRoomStore.getState();
+    const result = await store.resolveWorldPoint({ point: located.normalized, frame });
+    logTap(
+      `world ${tool} at ${located.normalized.x.toFixed(3)},${located.normalized.y.toFixed(3)} frame ${frame ?? "?"} -> ${result.ok ? result.id : result.reason}`,
+    );
+    if (!result.ok) {
+      showToast(result.reason);
+      return;
+    }
+    if (tool === "arrow" && !pendingWorldRef.current) {
+      pendingWorldRef.current = result.id;
+      pendingArrowRef.current = located.normalized;
+      setArrowPending(true);
+      return;
+    }
+    const now = store.serverNow();
+    const arrow = tool === "arrow";
+    store.addAnnotation({
+      id: uuid(),
+      type: tool === "laser" ? "pin" : tool,
+      creatorId: selfId ?? "unknown",
+      text: text || undefined,
+      stepId: store.state?.currentStepId ?? undefined,
+      createdAt: now,
+      updatedAt: now,
+      start: arrow ? pendingArrowRef.current! : located.normalized,
+      end: arrow ? located.normalized : undefined,
+      world: { start: arrow ? pendingWorldRef.current! : result.id, end: arrow ? result.id : undefined },
+    });
+    pendingWorldRef.current = null;
+    pendingArrowRef.current = null;
+    setArrowPending(false);
+    setDraftText("");
+  };
+
   const placeAnnotation = (point: Vec2) => {
+    if (world) {
+      void placeWorldAnnotation(point);
+      return;
+    }
     const located = locate(point);
     logTap(
       `place ${tool} at ${point.x.toFixed(0)},${point.y.toFixed(0)} -> ${
@@ -391,6 +514,14 @@ export function Room() {
   const changeTool = (next: Tool) => {
     setTool(next);
     pendingArrowRef.current = null;
+    pendingWorldRef.current = null;
+    setArrowPending(false);
+  };
+
+  const switchTracking = () => {
+    useRoomStore.getState().setTracking(world ? "sheet" : "world");
+    pendingArrowRef.current = null;
+    pendingWorldRef.current = null;
     setArrowPending(false);
   };
 
@@ -416,9 +547,26 @@ export function Room() {
   const helperLink = `${window.location.origin}/room/${roomCode}?role=helper`;
   const isLocalhost = /^(localhost|127\.|\[::1\])/.test(window.location.hostname);
 
+  const helperWorldStatus = worldStatus && Date.now() - worldStatus.ts < WORLD_STATUS_MAX_AGE_MS ? worldStatus.status : "off";
+  const trackingChip = !world
+    ? {
+        ok: tracking.state === "ok" || tracking.state === "holding",
+        label: `${TRACKING_LABEL[tracking.state]}${tracking.usingFallback ? " (presenter pose)" : ""}`,
+      }
+    : role === "presenter"
+      ? { ok: worldPhase === "running", label: WORLD_PHASE_LABEL[worldPhase] }
+      : {
+          ok: helperWorldStatus === "normal",
+          label: { normal: "World tracking", limited: "World tracking limited", starting: "World tracking starting", off: "World tracking off" }[
+            helperWorldStatus
+          ],
+        };
+
   let stageMessage: ReactNode = null;
   if (role === "presenter") {
-    if (camera.status === "error") {
+    if (presenterWorld || world === null) {
+      stageMessage = null;
+    } else if (camera.status === "error") {
       stageMessage = (
         <>
           <p>{camera.error}</p>
@@ -442,36 +590,62 @@ export function Room() {
       </>
     );
   } else if (!remoteStream) {
-    stageMessage = <p>Presenter is here. Connecting video…</p>;
+    stageMessage = <p>Presenter is here. Waiting for their camera…</p>;
   }
 
   return (
     <div className="room">
       <section className="stage">
-        <video ref={videoRef} className={mirrored ? "video mirrored" : "video"} autoPlay playsInline muted />
-        <Overlay
-          videoRef={videoRef}
-          viewRef={tracking.viewRef}
-          annotationsRef={annotationsRef}
-          localPointerRef={localPointerRef}
-          pendingArrowRef={pendingArrowRef}
-          verifyStatusRef={verifyStatusRef}
-          mirrored={mirrored}
-          debug={debug}
-          showGuidance={guided}
-          showVerifyZone={guided && showZone}
-          onPointerDown={onPointerDown}
-          onPointerMove={onPointerMove}
-          onPointerUp={onPointerUp}
+        <video
+          ref={videoRef}
+          className={presenterWorld ? "video hidden" : mirrored ? "video mirrored" : "video"}
+          autoPlay
+          playsInline
+          muted
         />
+        {presenterWorld ? (
+          <WorldStage
+            annotationsRef={annotationsRef}
+            onStream={setWorldStream}
+            onPhase={setWorldPhase}
+            onUseSheet={switchTracking}
+            fake={fakeWorld}
+            debug={debug}
+          />
+        ) : (
+          <Overlay
+            videoRef={videoRef}
+            viewRef={tracking.viewRef}
+            annotationsRef={annotationsRef}
+            localPointerRef={localPointerRef}
+            pendingArrowRef={pendingArrowRef}
+            verifyStatusRef={verifyStatusRef}
+            mirrored={mirrored}
+            debug={debug && !world}
+            showGuidance={guided}
+            showVerifyZone={guided && showZone && !world}
+            world={Boolean(world)}
+            onPointerDown={onPointerDown}
+            onPointerMove={onPointerMove}
+            onPointerUp={onPointerUp}
+          />
+        )}
         {stageMessage && <div className="stage-message">{stageMessage}</div>}
+        <video ref={pipRef} className={showHelperPip ? "pip" : "pip hidden"} autoPlay playsInline muted />
+        <video
+          ref={selfViewRef}
+          className={role === "helper" && helperCamStream ? "pip self" : "pip self hidden"}
+          autoPlay
+          playsInline
+          muted
+        />
         {needsSoundTap && (
           <button type="button" className="sound-tap" onClick={enableSound}>
             Tap to turn on sound
           </button>
         )}
         {toast && <div className="toast">{toast}</div>}
-        {role === "presenter" && camera.status === "ready" && (
+        {role === "presenter" && !presenterWorld && camera.status === "ready" && (
           <div className="stage-controls">
             <button type="button" onClick={() => camera.switchCamera()} aria-label="Switch camera">
               Flip
@@ -503,15 +677,12 @@ export function Room() {
           <span className={linkState === "connected" ? "chip ok" : linkState === "failed" ? "chip bad" : "chip warn"}>
             {linkLabel(linkState)}
           </span>
-          <span className={tracking.state === "ok" || tracking.state === "holding" ? "chip ok" : "chip bad"}>
-            {TRACKING_LABEL[tracking.state]}
-            {tracking.usingFallback ? " (presenter pose)" : ""}
-          </span>
-          {role === "presenter" && camera.status === "error" && <span className="chip bad">Camera unavailable</span>}
+          <span className={trackingChip.ok ? "chip ok" : "chip bad"}>{trackingChip.label}</span>
+          {role === "presenter" && !presenterWorld && camera.status === "error" && <span className="chip bad">Camera unavailable</span>}
         </div>
 
         <div className="controls">
-          {role === "presenter" ? (
+          {role === "presenter" && !presenterWorld && (
             <>
               <button type="button" onClick={() => camera.start()}>
                 {camera.status === "ready" ? "Restart camera" : "Start camera"}
@@ -520,14 +691,27 @@ export function Room() {
                 Use {camera.facingMode === "environment" ? "front" : "rear"} camera
               </button>
             </>
-          ) : (
-            <button type="button" onClick={toggleMic}>
-              {micStream ? "Mute my mic" : "Turn on my mic"}
+          )}
+          {role === "helper" && (
+            <>
+              <button type="button" className={micStream ? "active" : undefined} onClick={toggleMic}>
+                {micStream ? "Mute my mic" : "Turn on my mic"}
+              </button>
+              <button type="button" className={helperCamStream ? "active" : undefined} onClick={toggleHelperCamera}>
+                {helperCamStream ? "Turn off my camera" : "Turn on my camera"}
+              </button>
+            </>
+          )}
+          {!world && (
+            <button type="button" onClick={resetTracking}>
+              Reset tracking
             </button>
           )}
-          <button type="button" onClick={resetTracking}>
-            Reset tracking
-          </button>
+          {role === "presenter" && world !== null && (
+            <button type="button" onClick={switchTracking}>
+              {world ? "Use printed sheet" : "Use world tracking"}
+            </button>
+          )}
           <button type="button" onClick={reconnect}>
             Reconnect video
           </button>
@@ -555,12 +739,31 @@ export function Room() {
           </details>
         )}
         <StepsPanel role={role} />
-        <VerifyPanel role={role} local={localVerify} showZone={showZone} onToggleZone={setShowZone} />
-        <BenchPanel role={role} recorder={recorder} verificationRatio={localVerify?.ratio ?? null} />
-        <p className="muted small-text">
-          Print the <a href="/target.pdf" target="_blank" rel="noreferrer">tracking target</a> at 100% scale.
-        </p>
+        {world ? (
+          <p className="muted small-text">
+            World tracking: no printed sheet needed. Verification and the benchmark use the printed sheet - switch with
+            &ldquo;Use printed sheet&rdquo; on the presenter.
+          </p>
+        ) : (
+          <>
+            <VerifyPanel role={role} local={localVerify} showZone={showZone} onToggleZone={setShowZone} />
+            <BenchPanel role={role} recorder={recorder} verificationRatio={localVerify?.ratio ?? null} />
+            <p className="muted small-text">
+              Print the <a href="/target.pdf" target="_blank" rel="noreferrer">tracking target</a> at 100% scale.
+            </p>
+          </>
+        )}
       </aside>
     </div>
   );
+}
+
+/** JPEG of what a video element is showing, for remote debugging. */
+function videoFrame(video: HTMLVideoElement | null) {
+  if (!video?.videoWidth) return null;
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.min(720, video.videoWidth);
+  canvas.height = Math.round((canvas.width * video.videoHeight) / video.videoWidth);
+  canvas.getContext("2d")!.drawImage(video, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL("image/jpeg", 0.7);
 }
