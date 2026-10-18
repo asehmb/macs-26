@@ -1,7 +1,17 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import type { Role } from "../../../shared/src/types";
 import { AuthModal } from "../components/AuthModal";
 import { useFaceTimeStore } from "../state/facetime";
+
+const CALL_ROLE_KEY = "realitycheck:callRole";
+
+/** Phones film the object (world tracking only runs on phones); laptops guide. */
+function defaultCallRole(): Role {
+  const saved = localStorage.getItem(CALL_ROLE_KEY);
+  if (saved === "presenter" || saved === "helper") return saved;
+  return /Android|iPhone|iPad|iPod|Mobi/i.test(navigator.userAgent) || navigator.maxTouchPoints > 1 ? "presenter" : "helper";
+}
 
 export function Home() {
   const navigate = useNavigate();
@@ -24,6 +34,12 @@ export function Home() {
   const [addUsername, setAddUsername] = useState("");
   const [addFeedback, setAddFeedback] = useState<{ text: string; isError: boolean } | null>(null);
   const [adding, setAdding] = useState(false);
+  const [callRole, setCallRole] = useState<Role>(defaultCallRole);
+
+  const chooseCallRole = (role: Role) => {
+    setCallRole(role);
+    localStorage.setItem(CALL_ROLE_KEY, role);
+  };
 
   useEffect(() => {
     if (navigationTarget) {
@@ -118,6 +134,36 @@ export function Home() {
             <span>Recents</span>
           </button>
         </nav>
+
+        {/* Role for calls this user starts; the friend gets the other role */}
+        <div className="facetime-role-picker">
+          <span>When I call, I'll</span>
+          <div className="facetime-segmented-control" role="radiogroup" aria-label="Your role in calls you start">
+            <button
+              type="button"
+              role="radio"
+              aria-checked={callRole === "presenter"}
+              className={callRole === "presenter" ? "active" : ""}
+              onClick={() => chooseCallRole("presenter")}
+            >
+              📱 Show
+            </button>
+            <button
+              type="button"
+              role="radio"
+              aria-checked={callRole === "helper"}
+              className={callRole === "helper" ? "active" : ""}
+              onClick={() => chooseCallRole("helper")}
+            >
+              🧭 Guide
+            </button>
+          </div>
+          <p className="facetime-role-hint">
+            {callRole === "presenter"
+              ? "Your phone films the object; your friend guides you."
+              : "Your friend's phone films; you guide them."}
+          </p>
+        </div>
 
         {/* Add Friend bar */}
         <form onSubmit={handleAddFriend} className="facetime-add-bar">
@@ -219,8 +265,14 @@ export function Home() {
                             type="button"
                             className="facetime-call-btn"
                             disabled={friend.status !== "online"}
-                            onClick={() => startCall(friend.id, "presenter")}
-                            title={friend.status === "online" ? "Video call" : `${friend.displayName} is ${statusLabel.toLowerCase()}`}
+                            onClick={() => startCall(friend.id, callRole)}
+                            title={
+                              friend.status === "online"
+                                ? callRole === "presenter"
+                                  ? `Call ${friend.displayName} to guide you`
+                                  : `Call ${friend.displayName} to guide them`
+                                : `${friend.displayName} is ${statusLabel.toLowerCase()}`
+                            }
                           >
                             <svg viewBox="0 0 24 24" width="18" height="18" fill="white">
                               <path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/>
@@ -287,7 +339,7 @@ export function Home() {
                         <button
                           type="button"
                           className="facetime-call-btn compact"
-                          onClick={() => startCall(partnerId, "presenter")}
+                          onClick={() => startCall(partnerId, callRole)}
                           title={`Call back ${partnerName}`}
                         >
                           <svg viewBox="0 0 24 24" width="16" height="16" fill="white">

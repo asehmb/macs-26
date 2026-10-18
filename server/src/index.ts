@@ -336,7 +336,8 @@ io.on("connection", (socket) => {
   });
 
   // Direct FaceTime calling handlers
-  socket.on("call:start", ({ receiverId, role = "presenter" }: { receiverId: string; role?: Role }) => {
+  socket.on("call:start", ({ receiverId, role: requestedRole }: { receiverId: string; role?: Role }) => {
+    const role: Role = requestedRole === "helper" ? "helper" : "presenter";
     const callerId: string | undefined = socket.data.userId;
     if (!callerId) {
       socket.emit("call:failed", { error: "Please log in to make calls" });

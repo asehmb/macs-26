@@ -767,6 +767,27 @@ label.inline {
 }
 
 /* Add Friend Bar */
+.facetime-role-picker {
+  padding: 4px 16px 0;
+}
+
+.facetime-role-picker > span {
+  display: block;
+  font-size: 0.75rem;
+  color: #8e8e93;
+  margin-bottom: 6px;
+}
+
+.facetime-role-picker .facetime-segmented-control {
+  margin-bottom: 4px;
+}
+
+.facetime-role-hint {
+  margin: 0 0 4px;
+  font-size: 0.75rem;
+  color: #8e8e93;
+}
+
 .facetime-add-bar {
   display: flex;
   padding: 8px 16px 12px;

@@ -20,7 +20,9 @@ export function IncomingCallModal() {
 
         <div className="facetime-caller-info">
           <h2>{incoming.caller.displayName}</h2>
-          <p className="facetime-subtitle">RealityCheck video call…</p>
+          <p className="facetime-subtitle">
+            {incoming.role === "presenter" ? "Wants to guide you - you'll show your camera" : "Wants your guidance - you'll see their camera"}
+          </p>
           <span className="facetime-username">@{incoming.caller.username}</span>
         </div>
 

@@ -137,6 +137,18 @@ try {
   aliceSocket.emit("call:end", { callId: incoming.callId });
   const ended = await endedPromise;
   check("call end notifies peers and records duration", ended.callId === incoming.callId);
+  check("presenter caller makes the receiver the helper", (incoming as { role?: string }).role === "helper");
+
+  // Alice calls as the guide this time: she is the helper and Bob films.
+  const guideIncoming = new Promise<{ callId: string; role: string }>((resolve) => bobSocket.once("call:incoming", resolve));
+  const guideRinging = new Promise<{ role: string }>((resolve) => aliceSocket.once("call:ringing", resolve));
+  aliceSocket.emit("call:start", { receiverId: bob.id, role: "helper" });
+  const [asGuide, ringing] = await Promise.all([guideIncoming, guideRinging]);
+  check("helper caller keeps the helper role", ringing.role === "helper");
+  check("helper caller makes the receiver the presenter", asGuide.role === "presenter");
+  const guideEnded = new Promise((resolve) => bobSocket.once("call:ended", resolve));
+  aliceSocket.emit("call:end", { callId: asGuide.callId });
+  await guideEnded;
 
   aliceSocket.disconnect();
   bobSocket.disconnect();
