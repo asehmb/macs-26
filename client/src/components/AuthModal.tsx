@@ -34,7 +34,7 @@ export function AuthModal() {
           </svg>
         </div>
 
-        <h1>FaceTime</h1>
+        <h1>RealityCheck</h1>
         <p className="facetime-auth-desc">Sign in with your username to connect with friends</p>
 
         <div className="facetime-segmented-control">

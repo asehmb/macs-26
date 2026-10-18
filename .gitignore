@@ -9,3 +9,4 @@ client/dist
 *.log
 *.db*
 .playwright-mcp/
+.debug/

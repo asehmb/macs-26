@@ -16,10 +16,15 @@ export type Annotation = {
   /** Server-clock milliseconds, used for sync-latency measurement. */
   createdAt: number;
   updatedAt: number;
-  /** Target-space millimetres. */
+  /** Sheet tracking: target-space millimetres. World tracking: where the helper tapped, normalised 0..1 video coordinates. */
   start: Vec2;
   end?: Vec2;
+  /** World tracking: ids of the 3D points the presenter's phone resolved and keeps tracking (positions live on the phone). */
+  world?: { start: string; end?: string };
 };
+
+/** "world": markerless phone tracking (default). "sheet": the printed ArUco target, kept as fallback and benchmark ground truth. */
+export type TrackingMode = "world" | "sheet";
 
 export type Step = {
   id: string;
@@ -40,6 +45,23 @@ export type RoomState = {
   currentStepId: string | null;
   mode: GuidanceMode;
   verifyColor: ColorPreset;
+  tracking: TrackingMode;
+  /** Whether the helper is sending their webcam, so the presenter only shows the picture-in-picture when there is one. */
+  helperCamera: boolean;
+};
+
+export type WorldResolveRequest = {
+  /** Normalised 0..1 coordinates in the presenter's outgoing video. */
+  point: Vec2;
+  /** Frame number read from the video frame the helper tapped, if readable. */
+  frame?: number | null;
+};
+
+export type WorldResolveResult = { ok: true; id: string } | { ok: false; reason: string };
+
+export type WorldStatus = {
+  status: "starting" | "normal" | "limited" | "off";
+  ts: number;
 };
 
 export type PeerInfo = {

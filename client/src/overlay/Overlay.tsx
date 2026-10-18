@@ -11,6 +11,15 @@ export type OverlayView = {
   status: TrackingStatus;
   usingFallback: boolean;
   markers: Array<{ id: number; corners: Vec2[] }>;
+  info?: TrackingInfo;
+};
+
+export type TrackingInfo = {
+  videoSize: string;
+  frameSize: string;
+  detectMs: number;
+  fps: number;
+  error: string | null;
 };
 
 type OverlayProps = {
@@ -24,6 +33,11 @@ type OverlayProps = {
   debug: boolean;
   showGuidance: boolean;
   showVerifyZone: boolean;
+  /**
+   * World tracking: annotations are burned into the presenter's video, so this overlay only draws the helper's own
+   * laser and pending arrow start (in normalised video coordinates) and skips sheet-tracking banners.
+   */
+  world?: boolean;
   onPointerDown?: (point: Vec2) => void;
   onPointerMove?: (point: Vec2) => void;
   onPointerUp?: (point: Vec2) => void;
@@ -43,7 +57,7 @@ function project(h: Homography, p: Vec2): Vec2 | null {
   return { x: (h[0] * p.x + h[1] * p.y + h[2]) / w, y: (h[3] * p.x + h[4] * p.y + h[5]) / w };
 }
 
-function drawLabel(ctx: CanvasRenderingContext2D, text: string, at: Vec2) {
+export function drawLabel(ctx: CanvasRenderingContext2D, text: string, at: Vec2) {
   ctx.font = "600 15px system-ui, sans-serif";
   const width = ctx.measureText(text).width + 16;
   const x = at.x + 14;
@@ -56,7 +70,7 @@ function drawLabel(ctx: CanvasRenderingContext2D, text: string, at: Vec2) {
   ctx.fillText(text, x + 8, y + 18);
 }
 
-function drawPin(ctx: CanvasRenderingContext2D, at: Vec2, color = ACCENT) {
+export function drawPin(ctx: CanvasRenderingContext2D, at: Vec2, color = ACCENT) {
   ctx.fillStyle = color;
   ctx.strokeStyle = "#ffffff";
   ctx.lineWidth = 3;
@@ -66,7 +80,7 @@ function drawPin(ctx: CanvasRenderingContext2D, at: Vec2, color = ACCENT) {
   ctx.stroke();
 }
 
-function drawArrow(ctx: CanvasRenderingContext2D, from: Vec2, to: Vec2) {
+export function drawArrow(ctx: CanvasRenderingContext2D, from: Vec2, to: Vec2) {
   const angle = Math.atan2(to.y - from.y, to.x - from.x);
   const head = 18;
   ctx.strokeStyle = ACCENT;
@@ -85,7 +99,35 @@ function drawArrow(ctx: CanvasRenderingContext2D, from: Vec2, to: Vec2) {
   ctx.fill();
 }
 
-function drawBanner(ctx: CanvasRenderingContext2D, width: number, text: string, color: string) {
+export function drawTextMarker(ctx: CanvasRenderingContext2D, at: Vec2) {
+  ctx.fillStyle = ACCENT;
+  ctx.beginPath();
+  ctx.arc(at.x, at.y, 5, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+export function drawPointer(ctx: CanvasRenderingContext2D, at: Vec2, alpha: number) {
+  ctx.fillStyle = `rgba(239, 68, 68, ${0.35 * alpha})`;
+  ctx.beginPath();
+  ctx.arc(at.x, at.y, 22, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = `rgba(239, 68, 68, ${alpha})`;
+  ctx.beginPath();
+  ctx.arc(at.x, at.y, 8, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+export function drawPendingStart(ctx: CanvasRenderingContext2D, at: Vec2) {
+  ctx.strokeStyle = ACCENT;
+  ctx.lineWidth = 3;
+  ctx.setLineDash([4, 4]);
+  ctx.beginPath();
+  ctx.arc(at.x, at.y, 12, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+export function drawBanner(ctx: CanvasRenderingContext2D, width: number, text: string, color: string) {
   ctx.font = "600 15px system-ui, sans-serif";
   const textWidth = ctx.measureText(text).width;
   const boxWidth = Math.min(width - 24, textWidth + 28);
@@ -171,6 +213,19 @@ export function Overlay(props: OverlayProps) {
           ctx.arc(dot.x, dot.y, 12, 0, Math.PI * 2);
           ctx.stroke();
         }
+        const info = view.info;
+        const lines = [
+          `status ${view.status}${view.usingFallback ? " (presenter pose)" : ""}`,
+          `markers [${view.markers.map((m) => m.id).join(",")}]`,
+          info ? `video ${info.videoSize} · detect ${info.frameSize}` : "detector not running",
+          info ? `${info.fps.toFixed(1)} fps · ${info.detectMs.toFixed(0)} ms` : "",
+          info?.error ? `error: ${info.error}` : "",
+        ].filter(Boolean);
+        ctx.font = "600 12px ui-monospace, monospace";
+        ctx.fillStyle = "rgba(2, 6, 23, 0.75)";
+        ctx.fillRect(8, cssHeight - 12 - lines.length * 16, 280, lines.length * 16 + 6);
+        ctx.fillStyle = "#facc15";
+        lines.forEach((line, i) => ctx.fillText(line, 14, cssHeight - 12 - (lines.length - 1 - i) * 16 - 2, 268));
       }
 
       if (p.showVerifyZone && h) {
@@ -192,8 +247,14 @@ export function Overlay(props: OverlayProps) {
         }
       }
 
-      if (p.showGuidance && h) {
+      if (p.world) {
+        const pending = p.pendingArrowRef.current;
+        if (p.showGuidance && pending) drawPendingStart(ctx, normToCanvas(pending));
+      }
+
+      if (!p.world && p.showGuidance && h) {
         for (const annotation of p.annotationsRef.current) {
+          if (annotation.world) continue;
           const start = mmToCanvas(annotation.start);
           if (!start) continue;
           if (annotation.type === "arrow" && annotation.end) {
@@ -203,25 +264,12 @@ export function Overlay(props: OverlayProps) {
             continue;
           }
           if (annotation.type === "pin") drawPin(ctx, start);
-          if (annotation.type === "text") {
-            ctx.fillStyle = ACCENT;
-            ctx.beginPath();
-            ctx.arc(start.x, start.y, 5, 0, Math.PI * 2);
-            ctx.fill();
-          }
+          if (annotation.type === "text") drawTextMarker(ctx, start);
           if (annotation.text) drawLabel(ctx, annotation.text, start);
         }
         const pending = p.pendingArrowRef.current;
         const pendingAt = pending ? mmToCanvas(pending) : null;
-        if (pendingAt) {
-          ctx.strokeStyle = ACCENT;
-          ctx.lineWidth = 3;
-          ctx.setLineDash([4, 4]);
-          ctx.beginPath();
-          ctx.arc(pendingAt.x, pendingAt.y, 12, 0, Math.PI * 2);
-          ctx.stroke();
-          ctx.setLineDash([]);
-        }
+        if (pendingAt) drawPendingStart(ctx, pendingAt);
       }
 
       if (p.showGuidance) {
@@ -233,18 +281,11 @@ export function Overlay(props: OverlayProps) {
           if (age > POINTER_FADE_MS) continue;
           const at = pointer.space === "target" ? mmToCanvas(pointer.position) : normToCanvas(pointer.position);
           if (!at) continue;
-          const alpha = 1 - age / POINTER_FADE_MS;
-          ctx.fillStyle = `rgba(239, 68, 68, ${0.35 * alpha})`;
-          ctx.beginPath();
-          ctx.arc(at.x, at.y, 22, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.fillStyle = `rgba(239, 68, 68, ${alpha})`;
-          ctx.beginPath();
-          ctx.arc(at.x, at.y, 8, 0, Math.PI * 2);
-          ctx.fill();
+          drawPointer(ctx, at, 1 - age / POINTER_FADE_MS);
         }
       }
 
+      if (p.world) return;
       if (view.status === "lost") {
         drawBanner(ctx, cssWidth, "Target lost - point the camera at the printed target", "rgba(185, 28, 28, 0.9)");
       } else if (view.usingFallback) {

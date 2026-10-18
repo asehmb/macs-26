@@ -227,6 +227,63 @@ code {
   transform: scaleX(-1);
 }
 
+.video.hidden {
+  display: none;
+}
+
+.world-layer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
+
+.world-note {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  top: 12px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: rgba(146, 64, 14, 0.9);
+  font-size: 14px;
+  pointer-events: none;
+}
+
+.world-credit {
+  position: absolute;
+  left: 8px;
+  bottom: 4px;
+  font-size: 10px;
+  color: rgba(248, 250, 252, 0.6);
+}
+
+.pip {
+  position: absolute;
+  right: max(env(safe-area-inset-right), 12px);
+  top: 12px;
+  width: 28%;
+  max-width: 220px;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  border-radius: 12px;
+  border: 2px solid rgba(248, 250, 252, 0.8);
+  background: #0f172a;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+}
+
+.pip.self {
+  width: 18%;
+  max-width: 160px;
+  transform: scaleX(-1);
+}
+
+.pip.hidden {
+  display: none;
+}
+
 .overlay {
   position: absolute;
   inset: 0;
@@ -251,6 +308,70 @@ code {
 
 .stage-message .qr {
   justify-self: center;
+}
+
+.spike {
+  position: fixed;
+  inset: 0;
+  background: #000;
+  overflow: hidden;
+}
+
+.spike-layer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
+
+.spike-preview {
+  position: absolute;
+  top: max(env(safe-area-inset-top), 12px);
+  right: 12px;
+  width: 28vw;
+  max-width: 180px;
+  border: 2px solid #22d3ee;
+  border-radius: 8px;
+  pointer-events: none;
+}
+
+.spike-preview.hidden {
+  visibility: hidden;
+}
+
+.spike-hud {
+  position: absolute;
+  top: max(env(safe-area-inset-top), 12px);
+  left: 12px;
+  max-width: 62vw;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(2, 6, 23, 0.75);
+  color: #facc15;
+  font: 600 12px ui-monospace, monospace;
+  pointer-events: none;
+}
+
+.spike-controls {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: max(env(safe-area-inset-bottom), 28px);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+}
+
+.spike-credit {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: max(env(safe-area-inset-bottom), 4px);
+  text-align: center;
+  font-size: 10px;
+  color: rgba(248, 250, 252, 0.6);
 }
 
 .stage-controls {
@@ -646,6 +767,27 @@ label.inline {
 }
 
 /* Add Friend Bar */
+.facetime-role-picker {
+  padding: 4px 16px 0;
+}
+
+.facetime-role-picker > span {
+  display: block;
+  font-size: 0.75rem;
+  color: #8e8e93;
+  margin-bottom: 6px;
+}
+
+.facetime-role-picker .facetime-segmented-control {
+  margin-bottom: 4px;
+}
+
+.facetime-role-hint {
+  margin: 0 0 4px;
+  font-size: 0.75rem;
+  color: #8e8e93;
+}
+
 .facetime-add-bar {
   display: flex;
   padding: 8px 16px 12px;

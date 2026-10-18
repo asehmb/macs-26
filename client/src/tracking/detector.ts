@@ -58,7 +58,7 @@ export function loadDetector(): Promise<ArucoDetector> {
 }
 
 export class FrameDetector {
-  private canvas = document.createElement("canvas");
+  readonly canvas = document.createElement("canvas");
   private ctx = this.canvas.getContext("2d", { willReadFrequently: true });
 
   constructor(private detector: ArucoDetector) {}

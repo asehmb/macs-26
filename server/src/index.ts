@@ -1,4 +1,5 @@
 import express, { type Request, type Response, type NextFunction } from "express";
+import { mkdir, writeFile } from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import { Server, type Socket } from "socket.io";
@@ -15,8 +16,12 @@ import type {
   RoomState,
   SignalMessage,
   Step,
+  TrackingMode,
   User,
   VerifyReport,
+  WorldResolveRequest,
+  WorldResolveResult,
+  WorldStatus,
 } from "../../shared/src/types.ts";
 import {
   authenticateUser,
@@ -38,6 +43,8 @@ import {
   updateLastSeen,
 } from "./db.ts";
 
+const WORLD_RESOLVE_TIMEOUT_MS = 3000;
+
 const PORT = Number(process.env.PORT ?? 3001);
 const CLIENT_DIST = path.resolve(process.cwd(), "client", "dist");
 const EMPTY_ROOM_TTL_MS = 2 * 60 * 60 * 1000;
@@ -49,7 +56,7 @@ type Room = {
 };
 
 const app = express();
-app.use(express.json());
+app.use("/api", express.json());
 
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: true } });
@@ -248,6 +255,8 @@ function getRoom(code: string): Room {
         currentStepId: null,
         mode: "guided",
         verifyColor: "blue",
+        tracking: "world",
+        helperCamera: false,
       },
       members: new Map(),
       cleanupTimer: null,
@@ -280,8 +289,13 @@ function leave(socket: Socket) {
   socket.leave(code);
   socket.data.code = undefined;
   if (!room) return;
+  const role = room.members.get(socket.id);
   room.members.delete(socket.id);
   broadcastPeers(room);
+  if (role === "helper" && room.state.helperCamera && ![...room.members.values()].includes("helper")) {
+    room.state.helperCamera = false;
+    broadcastState(room);
+  }
   if (room.members.size === 0) {
     room.cleanupTimer = setTimeout(() => rooms.delete(code), EMPTY_ROOM_TTL_MS);
   }
@@ -322,7 +336,8 @@ io.on("connection", (socket) => {
   });
 
   // Direct FaceTime calling handlers
-  socket.on("call:start", ({ receiverId, role = "presenter" }: { receiverId: string; role?: Role }) => {
+  socket.on("call:start", ({ receiverId, role: requestedRole }: { receiverId: string; role?: Role }) => {
+    const role: Role = requestedRole === "helper" ? "helper" : "presenter";
     const callerId: string | undefined = socket.data.userId;
     if (!callerId) {
       socket.emit("call:failed", { error: "Please log in to make calls" });
@@ -618,6 +633,37 @@ io.on("connection", (socket) => {
     }),
   );
 
+  socket.on("tracking:set", ({ tracking }: { tracking: TrackingMode }) =>
+    mutate((state) => {
+      state.tracking = tracking === "sheet" ? "sheet" : "world";
+    }),
+  );
+
+  socket.on("media:camera", ({ on }: { on: boolean }) =>
+    mutate((state) => {
+      state.helperCamera = Boolean(on);
+    }),
+  );
+
+  // A helper tap in world mode: only the presenter's phone knows the 3D scene, so ask it and relay the answer.
+  socket.on("world:resolve", (request: WorldResolveRequest, ack: (result: WorldResolveResult) => void) => {
+    if (typeof ack !== "function") return;
+    const room = currentRoom();
+    const presenterId = room && [...room.members.entries()].find(([, role]) => role === "presenter")?.[0];
+    const presenter = presenterId ? io.sockets.sockets.get(presenterId) : undefined;
+    if (!presenter) return ack({ ok: false, reason: "The presenter isn't in the room." });
+    presenter
+      .timeout(WORLD_RESOLVE_TIMEOUT_MS)
+      .emit("world:resolve", request, (error: Error | null, result: WorldResolveResult) =>
+        ack(error || !result ? { ok: false, reason: "The presenter's phone didn't answer." } : result),
+      );
+  });
+
+  socket.on("world:status", (status: WorldStatus) => {
+    const room = currentRoom();
+    if (room) socket.volatile.to(room.state.code).emit("world:status", status);
+  });
+
   socket.on("verify:report", (report: VerifyReport) => {
     const room = currentRoom();
     if (room) socket.volatile.to(room.state.code).emit("verify:report", report);
@@ -641,6 +687,20 @@ io.on("connection", (socket) => {
 app.get("/healthz", (_req, res) => {
   res.json({ ok: true, rooms: rooms.size, at: Date.now() });
 });
+
+if (process.env.NODE_ENV !== "production") {
+  const debugDir = path.resolve(process.cwd(), ".debug");
+  app.post("/debug/report", express.json({ limit: "8mb" }), async (req, res) => {
+    const { image, ...report } = req.body as { image?: string | null; role?: string };
+    const role = report.role === "presenter" || report.role === "spike" ? report.role : "helper";
+    await mkdir(debugDir, { recursive: true });
+    await writeFile(path.join(debugDir, `${role}.json`), JSON.stringify({ at: new Date().toISOString(), ...report }, null, 2));
+    if (image?.startsWith("data:image/jpeg;base64,")) {
+      await writeFile(path.join(debugDir, `${role}.jpg`), Buffer.from(image.split(",")[1], "base64"));
+    }
+    res.sendStatus(204);
+  });
+}
 
 if (process.env.NODE_ENV === "production") {
   app.use(express.static(CLIENT_DIST));

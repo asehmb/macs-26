@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
-import type { OverlayView } from "../overlay/Overlay";
+import type { OverlayView, TrackingInfo } from "../overlay/Overlay";
 import { useRoomStore } from "../state/room";
 import { FrameDetector, loadDetector, type DetectionResult } from "./detector";
 import { scaleHomography } from "./homography";
@@ -15,12 +15,17 @@ export type TrackerState = TrackingStatus | "loading" | "error";
 type Options = {
   videoRef: RefObject<HTMLVideoElement | null>;
   useFallbackPose: boolean;
+  /** Off in world tracking mode, where there is no printed target to detect. */
+  enabled?: boolean;
   onFrame?: (detection: DetectionResult, frame: TrackingFrame) => void;
 };
 
-export function useTracking({ videoRef, useFallbackPose, onFrame }: Options) {
+export function useTracking({ videoRef, useFallbackPose, enabled = true, onFrame }: Options) {
+  const enabledRef = useRef(enabled);
+  enabledRef.current = enabled;
   const viewRef = useRef<OverlayView>({ homography: null, status: "lost", usingFallback: false, markers: [] });
   const trackerRef = useRef(new TargetTracker());
+  const detectorRef = useRef<FrameDetector | null>(null);
   const onFrameRef = useRef(onFrame);
   onFrameRef.current = onFrame;
   const fallbackRef = useRef(useFallbackPose);
@@ -51,16 +56,28 @@ export function useTracking({ videoRef, useFallbackPose, onFrame }: Options) {
       .then((detector) => {
         if (cancelled) return;
         const frameDetector = new FrameDetector(detector);
+        detectorRef.current = frameDetector;
         publish("lost", false);
+        const recentRuns: number[] = [];
+        let lastError: string | null = null;
 
         const tick = (now: number) => {
           raf = requestAnimationFrame(tick);
           const video = videoRef.current;
           const interval = avgDetectMs > SLOW_DETECT_MS ? SLOW_INTERVAL_MS : FAST_INTERVAL_MS;
-          if (!video || video.readyState < 2 || now - lastRun < interval) return;
+          if (!enabledRef.current || !video || video.readyState < 2 || now - lastRun < interval) return;
           lastRun = now;
+          recentRuns.push(now);
+          while (recentRuns.length && now - recentRuns[0] > 1000) recentRuns.shift();
 
-          const detection = frameDetector.detect(video);
+          let detection: DetectionResult | null;
+          try {
+            detection = frameDetector.detect(video);
+          } catch (error) {
+            lastError = error instanceof Error ? error.message : String(error);
+            viewRef.current = { ...viewRef.current, info: { ...infoFor(video, null, recentRuns.length), error: lastError } };
+            return;
+          }
           if (!detection) return;
           avgDetectMs = avgDetectMs ? avgDetectMs * 0.9 + detection.elapsedMs * 0.1 : detection.elapsedMs;
           const frame = trackerRef.current.update(detection.markers, now);
@@ -77,9 +94,19 @@ export function useTracking({ videoRef, useFallbackPose, onFrame }: Options) {
             }
           }
 
-          viewRef.current = { homography, status, usingFallback: fallback, markers: detection.markers };
+          viewRef.current = {
+            homography,
+            status,
+            usingFallback: fallback,
+            markers: detection.markers,
+            info: { ...infoFor(video, detection, recentRuns.length), detectMs: avgDetectMs, error: lastError },
+          };
           publish(status, fallback);
-          onFrameRef.current?.(detection, frame);
+          try {
+            onFrameRef.current?.(detection, frame);
+          } catch (error) {
+            lastError = error instanceof Error ? error.message : String(error);
+          }
         };
         raf = requestAnimationFrame(tick);
       })
@@ -98,5 +125,18 @@ export function useTracking({ videoRef, useFallbackPose, onFrame }: Options) {
     viewRef.current = { homography: null, status: "lost", usingFallback: false, markers: [] };
   }, []);
 
-  return { viewRef, state, usingFallback, reset };
+  /** JPEG of the last frame the detector saw, for remote debugging. */
+  const snapshot = useCallback(() => detectorRef.current?.canvas.toDataURL("image/jpeg", 0.75) ?? null, []);
+
+  return { viewRef, state, usingFallback, reset, snapshot };
+}
+
+function infoFor(video: HTMLVideoElement, detection: DetectionResult | null, fps: number): TrackingInfo {
+  return {
+    videoSize: `${video.videoWidth}x${video.videoHeight}`,
+    frameSize: detection ? `${detection.image.width}x${detection.image.height}` : "-",
+    detectMs: detection?.elapsedMs ?? 0,
+    fps,
+    error: null,
+  };
 }
