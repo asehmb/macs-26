@@ -4,6 +4,7 @@ Only measured values go here. No results have been recorded on real devices yet.
 
 ## Methodology
 
+- Tracking mode: printed sheet. The reference-marker error, detection, and verification metrics need it; in a room, tap **Use printed sheet** on the presenter before starting.
 - Task: the same physical task in both conditions (e.g. place the part in the printed zone, then follow the demo steps).
 - Conditions, set with the Guided / Baseline toggle in the Bench panel:
   - Baseline: video and voice only; annotations are hidden.
